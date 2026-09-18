@@ -75,6 +75,14 @@ def handle_signals() -> None:
             pass
 
 
+def get_account_marker_path() -> Path | None:
+    """Return path to profile-local account alias marker file."""
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if not home:
+        return None
+    return Path(home) / ".gemini" / "account_alias.txt"
+
+
 def main() -> int:
     handle_signals()
     record_invocation()
@@ -90,6 +98,53 @@ def main() -> int:
     if mode == "version":
         print(version)
         return 0
+
+    marker_path = get_account_marker_path()
+
+    # Record account alias if requested via argument or environment
+    alias_to_record = os.environ.get("FAKE_AGY_RECORD_ALIAS")
+    if "--record-alias" in sys.argv:
+        idx = sys.argv.index("--record-alias")
+        if idx + 1 < len(sys.argv):
+            alias_to_record = sys.argv[idx + 1]
+
+    if alias_to_record and marker_path:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(alias_to_record, encoding="utf-8")
+
+    # Handle sleep request
+    if "--sleep" in sys.argv:
+        idx = sys.argv.index("--sleep")
+        sleep_dur = 0.5
+        if idx + 1 < len(sys.argv):
+            try:
+                sleep_dur = float(sys.argv[idx + 1])
+            except ValueError:
+                sleep_dur = 0.5
+        ready_file = os.environ.get("FAKE_AGY_READY_FILE")
+        if ready_file:
+            Path(ready_file).write_text(str(os.getpid()))
+        time.sleep(sleep_dur)
+
+    # Handle logout simulation
+    if "--logout" in sys.argv:
+        if marker_path and marker_path.exists():
+            marker_path.unlink()
+        print("Logged out account alias.")
+        return 0
+
+    # Handle whoami query
+    if "whoami" in sys.argv or "--whoami" in sys.argv:
+        if marker_path and marker_path.exists():
+            print(marker_path.read_text(encoding="utf-8").strip())
+            return 0
+        print("unauthenticated", file=sys.stderr)
+        return 1
+
+    if os.environ.get("FAKE_AGY_REQUIRE_AUTH") in ("1", "true", "True"):
+        if not (marker_path and marker_path.exists()):
+            print("Error: Authentication required. Run login.", file=sys.stderr)
+            return 1
 
     if mode == "auth_error":
         msg = os.environ.get(
@@ -135,7 +190,6 @@ def main() -> int:
             return 130
 
     if mode == "spawn_child":
-        # Spawn a child process running fake_agy in sleep mode
         child_env = dict(os.environ)
         child_env["FAKE_AGY_MODE"] = "sleep"
         child_proc = subprocess.Popen(

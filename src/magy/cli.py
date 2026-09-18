@@ -11,6 +11,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Magy: Multi-profile launcher and orchestrator for Antigravity (agy)."
         ),
     )
+
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
     doctor_parser = subparsers.add_parser(
@@ -21,6 +22,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Output diagnostics in JSON format.",
+    )
+
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="Manage and bootstrap profiles.",
+    )
+    profile_subparsers = profile_parser.add_subparsers(
+        dest="profile_action", help="Profile actions"
+    )
+
+    create_p = profile_subparsers.add_parser(
+        "create", help="Create a profile directory layout."
+    )
+    create_p.add_argument("name", help="Profile name.")
+
+    auth_p = profile_subparsers.add_parser(
+        "auth",
+        help="Launch Agy interactively to authenticate a profile.",
+    )
+    auth_p.add_argument("name", help="Profile name.")
+    auth_p.add_argument(
+        "extra_args",
+        nargs=argparse.REMAINDER,
+        help="Optional extra arguments to pass to agy during authentication.",
+    )
+
+    run_p = profile_subparsers.add_parser(
+        "run",
+        help="Run an Agy command within a profile environment.",
+    )
+    run_p.add_argument("name", help="Profile name.")
+    run_p.add_argument(
+        "extra_args",
+        nargs=argparse.REMAINDER,
+        help="Arguments forwarded to agy.",
     )
 
     return parser
@@ -86,11 +122,47 @@ def run_doctor(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args, remaining = parser.parse_known_args(argv)
 
     if args.subcommand == "doctor":
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
         return run_doctor(args)
+
+    if args.subcommand == "profile":
+        from magy.profiles import ensure_profile_layout, run_in_profile
+
+        if args.profile_action == "create":
+            if remaining:
+                parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+            try:
+                ensure_profile_layout(args.name)
+                print(f"Created profile '{args.name}'")
+                return 0
+            except (ValueError, PermissionError, OSError) as e:
+                print(f"magy: error: {e}", file=sys.stderr)
+                return 1
+
+        elif args.profile_action in ("auth", "run"):
+            extra = list(getattr(args, "extra_args", []))
+            if extra and extra[0] == "--":
+                extra = extra[1:]
+            extra.extend(remaining)
+            try:
+                return run_in_profile(args.name, extra)
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+                print(f"magy: error: {e}", file=sys.stderr)
+                return 1
+        else:
+            parser.parse_args(["profile", "--help"])
+            return 0
+
+    if remaining:
+        parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
 
     parser.print_help()
     return 0
