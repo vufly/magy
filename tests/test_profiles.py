@@ -2,6 +2,7 @@ import concurrent.futures
 import os
 import shutil
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -387,7 +388,8 @@ def test_cli_profile_preserves_double_dash_args(fake_agy, monkeypatch):
 
     invocations = fake_agy.get_invocations()
     assert len(invocations) == 1
-    assert invocations[0]["args"] == ["--flag", "--other", "val"]
+    assert invocations[0]["args"][:3] == ["--flag", "--other", "val"]
+    assert "--log-file" in invocations[0]["args"]
 
 
 def test_cli_profile_missing_executable_error(monkeypatch, capsys):
@@ -413,3 +415,73 @@ def test_cli_profile_rejects_unknown_top_level_options():
     with pytest.raises(SystemExit) as exc_info3:
         main(["profile", "create", "test-p", "--unexpected"])
     assert exc_info3.value.code == 2
+
+
+def test_profile_environment_isolation_and_xdg_roots(fake_agy, monkeypatch):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+
+    ret = run_in_profile("xdg-p", ["models"])
+    assert ret == 0
+
+    inv = fake_agy.get_invocations()[0]["env"]
+    p_home = str(get_profile_home_dir("xdg-p").resolve())
+    assert inv["HOME"] == p_home
+
+    if os.name != "nt":
+        home_path = Path(p_home)
+        assert inv["XDG_CONFIG_HOME"] == str(home_path / ".config")
+        assert inv["XDG_DATA_HOME"] == str(home_path / ".local" / "share")
+        assert inv["XDG_CACHE_HOME"] == str(home_path / ".cache")
+        assert inv["XDG_STATE_HOME"] == str(home_path / ".local" / "state")
+
+
+def test_profile_launch_skips_indirect_and_prevents_side_effects(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.delenv("MAGY_AGY_CMD", raising=False)
+    side_effect = tmp_path / "multicall_side_effect.marker"
+    monkeypatch.setenv("FAKE_MULTICALL_SIDE_EFFECT_FILE", str(side_effect))
+
+    # Candidate 1: multicall launcher on PATH
+    bin1 = tmp_path / "bin1"
+    bin1.mkdir(parents=True, exist_ok=True)
+    multicall = bin1 / "fake_manager"
+    multicall.write_text(
+        f'#!/bin/sh\necho probe > "{side_effect}"\nexit 1\n', encoding="utf-8"
+    )
+    multicall.chmod(0o755)
+    (bin1 / "agy").symlink_to(multicall)
+
+    # Candidate 2: direct fake Agy
+    bin2 = tmp_path / "bin2"
+    bin2.mkdir(parents=True, exist_ok=True)
+    direct = bin2 / "agy"
+    direct.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" -m magy.testing.fake_agy "$@"\n',
+        encoding="utf-8",
+    )
+    direct.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin1}:{bin2}")
+
+    ret = run_in_profile("skip-indirect-p", ["models"])
+    assert ret == 0
+    assert not side_effect.exists()
+
+    # Profile home layout must not contain any tool-manager dirs
+    p_home = get_profile_home_dir("skip-indirect-p")
+    assert not (p_home / ".local" / "share" / "mise").exists()
+
+
+def test_profile_explicit_xdg_env_preserved(fake_agy, monkeypatch):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+
+    ret = run_in_profile(
+        "custom-xdg",
+        ["models"],
+        env_overrides={"XDG_CONFIG_HOME": "/custom/config/path"},
+    )
+    assert ret == 0
+
+    inv = fake_agy.get_invocations()[0]["env"]
+    assert inv["XDG_CONFIG_HOME"] == "/custom/config/path"

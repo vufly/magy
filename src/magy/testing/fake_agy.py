@@ -15,10 +15,23 @@ DEFAULT_RECORD_VARS = [
     "AGY_CLI_DISABLE_AUTO_UPDATE",
     "MAGY_PROFILE",
     "MAGY_AGY_CMD",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
 ]
 
 
 def record_invocation() -> None:
+    if os.environ.get("FAKE_AGY_IS_MULTICALL") == "1":
+        side_effect_file = os.environ.get("FAKE_MULTICALL_SIDE_EFFECT_FILE")
+        if side_effect_file:
+            p = Path(side_effect_file)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(
+                f"FORBIDDEN_MULTICALL_EXECUTED:{sys.argv[0]}\n", encoding="utf-8"
+            )
+
     log_file = os.environ.get("FAKE_AGY_LOG_FILE")
     if not log_file:
         return
@@ -34,6 +47,7 @@ def record_invocation() -> None:
     entry = {
         "timestamp": time.time(),
         "pid": os.getpid(),
+        "argv0": sys.argv[0],
         "args": sys.argv[1:],
         "env": recorded_env,
     }
@@ -98,6 +112,38 @@ def main() -> int:
     if mode == "version":
         print(version)
         return 0
+
+    # Handle interactive probe mode
+    if mode == "interactive_probe" or "--interactive-probe" in sys.argv:
+        tty_file = os.environ.get("FAKE_AGY_TTY_STATUS_FILE")
+        if tty_file:
+            tty_info = (
+                f"0={sys.stdin.isatty()},"
+                f"1={sys.stdout.isatty()},"
+                f"2={sys.stderr.isatty()}"
+            )
+            Path(tty_file).write_text(tty_info, encoding="utf-8")
+        sys.stdout.write("AUTH_PROMPT> ")
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        sys.stdout.write(f"RECEIVED:{line.strip()}\n")
+        sys.stdout.flush()
+        return 0
+
+    # Write log content if requested
+    log_content_to_write = os.environ.get("FAKE_AGY_WRITE_LOG")
+    if log_content_to_write:
+        log_arg_path: str | None = None
+        for i, a in enumerate(sys.argv):
+            if a in ("--log-file", "-l", "--log") and i + 1 < len(sys.argv):
+                log_arg_path = sys.argv[i + 1]
+            elif a.startswith(("--log-file=", "--log=")):
+                log_arg_path = a.split("=", 1)[1]
+        if log_arg_path:
+            lp = Path(log_arg_path)
+            lp.parent.mkdir(parents=True, exist_ok=True)
+            with open(lp, "a", encoding="utf-8") as f:
+                f.write(log_content_to_write + "\n")
 
     marker_path = get_account_marker_path()
 

@@ -17,57 +17,195 @@ from magy.config import (
     get_state_dir,
     load_config_result,
 )
-from magy.storage import safe_expand_path
 
 
-def _is_executable_file(path: Path) -> bool:
-    return path.is_file() and os.access(path, os.X_OK)
+def classify_candidate(path: Path) -> tuple[bool, str | None]:
+    """Classify whether a candidate executable is direct or indirect.
+
+    Returns:
+        (is_direct, reason_if_indirect_or_invalid)
+    """
+    try:
+        if path.is_symlink() and not path.exists():
+            return False, "broken symlink"
+        if not path.exists():
+            return False, "file not found"
+        if not path.is_file():
+            return False, "not a regular file"
+        if not os.access(path, os.X_OK):
+            return False, "not executable"
+        if path.is_symlink():
+            target = path.resolve()
+            if target.name.lower() != path.name.lower():
+                return False, f"multicall shim pointing to '{target.name}'"
+            return False, "symlink indirection"
+        return True, None
+    except OSError as e:
+        return False, str(e)
+
+
+def execute_resolver(
+    resolver_argv: list[str],
+    cwd: Path | None = None,
+    timeout: float = 5.0,
+) -> tuple[Path | None, str | None]:
+    """Execute configured lookup resolver and validate direct executable output."""
+    if not resolver_argv:
+        return None, "empty resolver command"
+    try:
+        res = subprocess.run(
+            resolver_argv,
+            cwd=cwd,
+            env=os.environ,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if res.returncode != 0:
+            err_detail = res.stderr.strip() or f"exit code {res.returncode}"
+            return None, f"resolver ({' '.join(resolver_argv)} failed: {err_detail})"
+
+        lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+        if not lines:
+            return None, f"resolver ({' '.join(resolver_argv)} returned empty output)"
+        if len(lines) > 1:
+            return None, f"resolver ({' '.join(resolver_argv)} returned multiple lines)"
+
+        out_str = lines[0]
+        out_path = Path(out_str)
+        if not out_path.is_absolute():
+            cmd_str = " ".join(resolver_argv)
+            return (
+                None,
+                f"resolver ({cmd_str} returned relative path '{out_str}')",
+            )
+
+        is_direct, reason = classify_candidate(out_path)
+        if not is_direct:
+            return (
+                None,
+                f"resolver ({' '.join(resolver_argv)} returned {reason}: '{out_str}')",
+            )
+
+        return out_path, None
+    except subprocess.TimeoutExpired:
+        return None, f"resolver ({' '.join(resolver_argv)} timed out after {timeout}s)"
+    except OSError as e:
+        return None, f"resolver ({' '.join(resolver_argv)} failed to execute: {e})"
 
 
 def resolve_agy_executable(
     configured_cmd: str | None = None,
+    configured_resolver: list[str] | None = None,
     path_env: str | None = None,
+    cwd: Path | None = None,
 ) -> tuple[Path | None, str | None]:
-    """Resolve agy executable following precedence:
+    """Resolve direct agy executable candidate.
 
-    1. MAGY_AGY_CMD environment variable
-    2. Configured executable path
-    3. agy on PATH
+    Preserves invocation identity without replacing it with canonical symlink target.
 
-    Returns (resolved_path, source_description).
+    Precedence:
+      1. MAGY_AGY_CMD environment variable (direct executable only)
+      2. Configured resolver (agy_resolver) or configured direct path (agy_cmd)
+      3. First direct agy executable found on PATH (skipping indirect/multicall shims)
+
+    Returns (lexical_path, source_description_or_error).
     """
     env_cmd = os.environ.get("MAGY_AGY_CMD")
-    if env_cmd:
-        try:
-            p = safe_expand_path(env_cmd)
-            if _is_executable_file(p):
-                return p.resolve(), "MAGY_AGY_CMD"
-        except (RuntimeError, OSError):
-            pass
-        which_p = shutil.which(env_cmd, path=path_env)
-        if which_p:
-            return Path(which_p).resolve(), "MAGY_AGY_CMD"
-        return None, f"MAGY_AGY_CMD ('{env_cmd}' not found or not executable)"
+    if env_cmd is not None:
+        if not env_cmd.strip():
+            return None, "MAGY_AGY_CMD (empty path)"
+        p = Path(os.path.expanduser(env_cmd))
+        if not p.is_absolute():
+            if "/" in env_cmd or "\\" in env_cmd:
+                base_cwd = cwd if cwd is not None else Path.cwd()
+                p = base_cwd / p
+            else:
+                which_p = shutil.which(env_cmd, path=path_env)
+                if which_p:
+                    p = Path(which_p)
+                else:
+                    return (
+                        None,
+                        f"MAGY_AGY_CMD ('{env_cmd}' not found or not executable)",
+                    )
+
+        is_direct, reason = classify_candidate(p)
+        if not is_direct:
+            return None, f"MAGY_AGY_CMD ('{env_cmd}' {reason})"
+        return p, "MAGY_AGY_CMD"
+
+    if configured_resolver is not None:
+        exe, err = execute_resolver(configured_resolver, cwd=cwd)
+        if exe is not None:
+            return exe, "resolver"
+        return None, f"config ({err})"
 
     if configured_cmd is not None:
         if not isinstance(configured_cmd, str):
             return None, f"config (invalid type {type(configured_cmd).__name__})"
         if not configured_cmd.strip():
             return None, "config (empty path)"
-        try:
-            p = safe_expand_path(configured_cmd)
-            if _is_executable_file(p):
-                return p.resolve(), "config"
-        except (RuntimeError, OSError):
-            pass
-        which_p = shutil.which(configured_cmd, path=path_env)
-        if which_p:
-            return Path(which_p).resolve(), "config"
-        return None, f"config ('{configured_cmd}' not found or not executable)"
 
-    which_p = shutil.which("agy", path=path_env)
-    if which_p:
-        return Path(which_p).resolve(), "PATH"
+        p = Path(os.path.expanduser(configured_cmd))
+        if not p.is_absolute():
+            if "/" in configured_cmd or "\\" in configured_cmd:
+                base_cwd = cwd if cwd is not None else Path.cwd()
+                p = base_cwd / p
+            else:
+                which_p = shutil.which(configured_cmd, path=path_env)
+                if which_p:
+                    p = Path(which_p)
+                else:
+                    return (
+                        None,
+                        f"config ('{configured_cmd}' not found or not executable)",
+                    )
+
+        is_direct, reason = classify_candidate(p)
+        if not is_direct:
+            return None, f"config ('{configured_cmd}' {reason})"
+        return p, "config"
+
+    if path_env is None:
+        path_env = os.environ.get("PATH", "")
+
+    path_dirs = [d for d in path_env.split(os.pathsep) if d.strip()]
+    rejected_candidates: list[tuple[Path, str]] = []
+
+    exe_names = ["agy"]
+    if os.name == "nt":
+        pathext = [
+            x.lower()
+            for x in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+            if x.strip()
+        ]
+        exe_names = ["agy" + ext for ext in pathext] + ["agy"]
+
+    for d in path_dirs:
+        dir_path = Path(d)
+        for name in exe_names:
+            candidate = dir_path / name
+            try:
+                if not candidate.exists() and not candidate.is_symlink():
+                    continue
+            except OSError:
+                continue
+
+            is_direct, reason = classify_candidate(candidate)
+            if is_direct:
+                return candidate, "PATH"
+            if reason != "broken symlink":
+                rejected_candidates.append((candidate, reason or "indirect"))
+
+    if rejected_candidates:
+        first_cand, reason = rejected_candidates[0]
+        return (
+            None,
+            f"PATH ('{first_cand}' is an indirect launcher ({reason}); "
+            "configure a direct path or agy_resolver)",
+        )
 
     return None, None
 
@@ -106,6 +244,8 @@ class AgyDiagnostics:
     discovery_source: str | None
     agy_version: str | None
     missing_prerequisites: list[str]
+    rejected_candidate: Path | None = None
+    resolver_cmd: list[str] | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -121,9 +261,13 @@ def collect_diagnostics() -> AgyDiagnostics:
 
     cfg_result = load_config_result()
     cfg = cfg_result.config
-    exe, source = resolve_agy_executable(configured_cmd=cfg.agy_cmd)
+    exe, source = resolve_agy_executable(
+        configured_cmd=cfg.agy_cmd,
+        configured_resolver=cfg.agy_resolver,
+    )
 
     missing: list[str] = []
+    rejected_candidate: Path | None = None
 
     if cfg_result.error:
         missing.append(f"Config error: {cfg_result.error}")
@@ -131,6 +275,12 @@ def collect_diagnostics() -> AgyDiagnostics:
     if exe is None:
         if source:
             missing.append(f"Agy executable invalid: {source}")
+            if "indirect launcher" in source and "('" in source:
+                try:
+                    cand_str = source.split("('", 1)[1].split("'", 1)[0]
+                    rejected_candidate = Path(cand_str)
+                except Exception:
+                    pass
         else:
             missing.append(
                 "Agy executable not found (checked MAGY_AGY_CMD, config, and PATH)"
@@ -187,6 +337,8 @@ def collect_diagnostics() -> AgyDiagnostics:
         discovery_source=source,
         agy_version=agy_ver,
         missing_prerequisites=missing,
+        rejected_candidate=rejected_candidate,
+        resolver_cmd=cfg.agy_resolver,
     )
 
 

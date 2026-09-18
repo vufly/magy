@@ -59,6 +59,7 @@ def get_state_dir(create: bool = True) -> Path:
 @dataclass
 class MagyConfig:
     agy_cmd: str | None = None
+    agy_resolver: list[str] | None = None
     cooldown_rate_limit: float = 60.0
     cooldown_quota: float = 3600.0
     cooldown_timeout: float = 30.0
@@ -66,6 +67,9 @@ class MagyConfig:
     cooldown_auth: float = 86400.0
 
     def __post_init__(self) -> None:
+        if self.agy_cmd is not None and self.agy_resolver is not None:
+            raise ValueError("agy_cmd and agy_resolver are mutually exclusive")
+
         if self.agy_cmd is not None:
             if not isinstance(self.agy_cmd, str):
                 raise TypeError(
@@ -74,6 +78,22 @@ class MagyConfig:
                 )
             if not self.agy_cmd.strip():
                 raise ValueError("agy_cmd cannot be an empty string")
+
+        if self.agy_resolver is not None:
+            if not isinstance(self.agy_resolver, list):
+                raise TypeError(
+                    "agy_resolver must be a list of strings, got "
+                    f"{type(self.agy_resolver).__name__}"
+                )
+            if len(self.agy_resolver) == 0:
+                raise ValueError("agy_resolver cannot be empty")
+            for i, item in enumerate(self.agy_resolver):
+                if not isinstance(item, str):
+                    raise TypeError(
+                        f"agy_resolver[{i}] must be a string, got {type(item).__name__}"
+                    )
+                if not item.strip():
+                    raise ValueError(f"agy_resolver[{i}] cannot be an empty string")
 
         for attr in (
             "cooldown_rate_limit",
@@ -98,6 +118,7 @@ class MagyConfig:
         try:
             return cls(
                 agy_cmd=data.get("agy_cmd"),
+                agy_resolver=data.get("agy_resolver"),
                 cooldown_rate_limit=float(data.get("cooldown_rate_limit", 60.0)),
                 cooldown_quota=float(data.get("cooldown_quota", 3600.0)),
                 cooldown_timeout=float(data.get("cooldown_timeout", 30.0)),
@@ -105,7 +126,7 @@ class MagyConfig:
                 cooldown_auth=float(data.get("cooldown_auth", 86400.0)),
             )
         except (ValueError, TypeError) as e:
-            raise ValueError(f"Invalid cooldown setting in configuration: {e}") from e
+            raise ValueError(f"Invalid configuration setting: {e}") from e
 
 
 @dataclass

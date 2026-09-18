@@ -1,12 +1,9 @@
 import fnmatch
-import io
 import ntpath
 import os
 import shutil
 import signal
 import subprocess
-import sys
-import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -751,6 +748,16 @@ def build_profile_env(
     env["MAGY_PROFILE"] = name
 
     apply_home_to_env(p_home_str, env, os_type)
+    if os_type != "nt":
+        p_home_path = Path(p_home_str)
+        if "XDG_CONFIG_HOME" not in env:
+            env["XDG_CONFIG_HOME"] = str(p_home_path / ".config")
+        if "XDG_DATA_HOME" not in env:
+            env["XDG_DATA_HOME"] = str(p_home_path / ".local" / "share")
+        if "XDG_CACHE_HOME" not in env:
+            env["XDG_CACHE_HOME"] = str(p_home_path / ".cache")
+        if "XDG_STATE_HOME" not in env:
+            env["XDG_STATE_HOME"] = str(p_home_path / ".local" / "state")
     return env
 
 
@@ -778,7 +785,11 @@ def run_in_profile(
         cfg_res = load_config_result()
         if cfg_res.error:
             raise ValueError(f"Invalid configuration: {cfg_res.error}")
-        exe, source = resolve_agy_executable(configured_cmd=cfg_res.config.agy_cmd)
+        exe, source = resolve_agy_executable(
+            configured_cmd=cfg_res.config.agy_cmd,
+            configured_resolver=cfg_res.config.agy_resolver,
+            cwd=cwd,
+        )
         if exe is None:
             if source:
                 raise FileNotFoundError(f"Agy executable invalid: {source}")
@@ -806,14 +817,33 @@ def run_in_profile(
             elif arg.startswith(("--log-file=", "--log=")):
                 caller_log_file = Path(arg.split("=", 1)[1])
 
+        effective_log_file: Path | None = None
+        if caller_log_file is not None:
+            base_cwd = cwd if cwd is not None else Path.cwd()
+            effective_log_file = (
+                (base_cwd / caller_log_file)
+                if not caller_log_file.is_absolute()
+                else caller_log_file
+            )
+
         injected_log_file: Path | None = None
         cmd_args = list(args)
-        if inject_log_file and caller_log_file is None:
+        if (inject_log_file or update_health) and caller_log_file is None:
             logs_dir = get_state_dir() / "logs" / name
             logs_dir.mkdir(parents=True, exist_ok=True)
             ensure_private_directory(logs_dir)
             injected_log_file = logs_dir / f"{run_id}.log"
-            cmd_args = [*args, "--log-file", str(injected_log_file)]
+            if "--" in args:
+                dash_idx = args.index("--")
+                cmd_args = [
+                    *args[:dash_idx],
+                    "--log-file",
+                    str(injected_log_file),
+                    *args[dash_idx:],
+                ]
+            else:
+                cmd_args = [*args, "--log-file", str(injected_log_file)]
+            effective_log_file = injected_log_file
 
         cmd = [str(executable), *cmd_args]
 
@@ -831,62 +861,14 @@ def run_in_profile(
             stdout_text = res.stdout
             stderr_text = res.stderr
         else:
-            # Stream stdout and stderr with bounded rolling tails for health
-            captured_stdout = bytearray()
-            captured_stderr = bytearray()
-            stdin_target = None
-            try:
-                if sys.stdin and hasattr(sys.stdin, "fileno"):
-                    sys.stdin.fileno()
-                    stdin_target = sys.stdin
-            except (io.UnsupportedOperation, AttributeError, OSError):
-                stdin_target = None
-
             proc = subprocess.Popen(
                 cmd,
                 env=env,
                 cwd=cwd,
-                stdin=stdin_target,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdin=None,
+                stdout=None,
+                stderr=None,
             )
-
-            def _forward_pipe(
-                pipe: Any, out_stream: Any, captured_buf: bytearray
-            ) -> None:
-                try:
-                    while True:
-                        chunk = pipe.read(4096)
-                        if not chunk:
-                            break
-                        try:
-                            if hasattr(out_stream, "buffer"):
-                                out_stream.buffer.write(chunk)
-                                out_stream.buffer.flush()
-                            else:
-                                text_c = chunk.decode("utf-8", errors="replace")
-                                out_stream.write(text_c)
-                                out_stream.flush()
-                        except Exception:
-                            pass
-                        captured_buf.extend(chunk)
-                        if len(captured_buf) > 65536:
-                            del captured_buf[:-65536]
-                finally:
-                    pipe.close()
-
-            t_out = threading.Thread(
-                target=_forward_pipe,
-                args=(proc.stdout, sys.stdout, captured_stdout),
-                daemon=True,
-            )
-            t_err = threading.Thread(
-                target=_forward_pipe,
-                args=(proc.stderr, sys.stderr, captured_stderr),
-                daemon=True,
-            )
-            t_out.start()
-            t_err.start()
 
             # Signal forwarding
             def _handler(signum: int, frame: Any) -> None:
@@ -911,19 +893,16 @@ def run_in_profile(
                     signal.signal(signal.SIGINT, old_sigint)
                 if old_sigterm is not None:
                     signal.signal(signal.SIGTERM, old_sigterm)
-                t_out.join(timeout=1.0)
-                t_err.join(timeout=1.0)
 
-            stdout_text = captured_stdout.decode("utf-8", errors="replace")
-            stderr_text = captured_stderr.decode("utf-8", errors="replace")
+            stdout_text = ""
+            stderr_text = ""
 
         if update_health:
             from magy.agy import classify_run_health, read_bounded_log_tail
 
-            effective_log = caller_log_file or injected_log_file
             log_content = ""
-            if effective_log and effective_log.is_file():
-                log_content = read_bounded_log_tail(effective_log, max_bytes=32768)
+            if effective_log_file and effective_log_file.is_file():
+                log_content = read_bounded_log_tail(effective_log_file, max_bytes=32768)
 
             classification = classify_run_health(
                 retcode,

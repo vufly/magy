@@ -300,3 +300,127 @@ def test_doctor_root_permission_enforcement_failure(fake_agy, monkeypatch, capsy
     assert any(
         "Permission denied accessing" in m for m in data["missing_prerequisites"]
     )
+
+
+def test_doctor_reports_direct_path_and_never_probes_indirect(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("MAGY_AGY_CMD", raising=False)
+    side_effect = tmp_path / "multicall_probed.marker"
+    monkeypatch.setenv("FAKE_MULTICALL_SIDE_EFFECT_FILE", str(side_effect))
+
+    # Candidate 1: indirect shim
+    bin1 = tmp_path / "bin1"
+    bin1.mkdir(parents=True, exist_ok=True)
+    multicall = bin1 / "fake_manager"
+    multicall.write_text(
+        f'#!/bin/sh\necho probe > "{side_effect}"\nexit 1\n', encoding="utf-8"
+    )
+    multicall.chmod(0o755)
+    (bin1 / "agy").symlink_to(multicall)
+
+    # Candidate 2: direct executable
+    bin2 = tmp_path / "bin2"
+    bin2.mkdir(parents=True, exist_ok=True)
+    direct = bin2 / "agy"
+    direct.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
+        '  echo "1.2.6-direct"\n  exit 0\nfi\nexit 0\n',
+        encoding="utf-8",
+    )
+    direct.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin1}:{bin2}")
+
+    ret = main(["doctor"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert str(direct) in captured.out
+    assert "1.2.6-direct" in captured.out
+    assert not side_effect.exists()
+
+
+def test_doctor_indirect_only_fails_without_invoking_launcher(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("MAGY_AGY_CMD", raising=False)
+    side_effect = tmp_path / "multicall_probed.marker"
+    monkeypatch.setenv("FAKE_MULTICALL_SIDE_EFFECT_FILE", str(side_effect))
+
+    bin1 = tmp_path / "bin1"
+    bin1.mkdir(parents=True, exist_ok=True)
+    multicall = bin1 / "mise"
+    multicall.write_text(
+        f'#!/bin/sh\necho probe > "{side_effect}"\nexit 1\n', encoding="utf-8"
+    )
+    multicall.chmod(0o755)
+    (bin1 / "agy").symlink_to(multicall)
+
+    monkeypatch.setenv("PATH", str(bin1))
+
+    ret = main(["doctor"])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert "Status: FAILED" in captured.out
+    assert "indirect launcher" in captured.out
+    assert not side_effect.exists()
+
+
+def test_doctor_resolver_dynamic_upgrade_reporting(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("MAGY_AGY_CMD", raising=False)
+
+    v1_exe = tmp_path / "v1_agy"
+    v1_exe.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
+        '  echo "1.0.0-v1"\n  exit 0\nfi\nexit 0\n',
+        encoding="utf-8",
+    )
+    v1_exe.chmod(0o755)
+
+    v2_exe = tmp_path / "v2_agy"
+    v2_exe.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
+        '  echo "2.0.0-v2"\n  exit 0\nfi\nexit 0\n',
+        encoding="utf-8",
+    )
+    v2_exe.chmod(0o755)
+
+    state_file = tmp_path / "active_manager_state.txt"
+    state_file.write_text(str(v1_exe), encoding="utf-8")
+
+    resolver_script = tmp_path / "resolver.py"
+    resolver_code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f'print(Path("{state_file}").read_text(encoding="utf-8").strip())\n'
+    )
+    resolver_script.write_text(resolver_code, encoding="utf-8")
+
+    from magy.config import get_config_file_path
+
+    cfg_path = get_config_file_path()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    import sys
+
+    cfg_path.write_text(
+        json.dumps({"agy_resolver": [sys.executable, str(resolver_script)]}),
+        encoding="utf-8",
+    )
+
+    # First doctor check
+    ret1 = main(["doctor"])
+    assert ret1 == 0
+    out1 = capsys.readouterr().out
+    assert str(v1_exe) in out1
+    assert "1.0.0-v1" in out1
+
+    # Simulate upgrade
+    state_file.write_text(str(v2_exe), encoding="utf-8")
+
+    # Second doctor check
+    ret2 = main(["doctor"])
+    assert ret2 == 0
+    out2 = capsys.readouterr().out
+    assert str(v2_exe) in out2
+    assert "2.0.0-v2" in out2

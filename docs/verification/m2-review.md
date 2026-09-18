@@ -1,102 +1,440 @@
-# Milestone 2 Review: Profiles, Routing, And CLI
+# Milestone 2 Remediation Re-review
 
 ## Decision
 
-**Pass.** All High (H1–H4) and Medium (M1–M4) findings identified during the
-Milestone 2 review have been remediated, verified with targeted regressions,
-and validated across Python 3.14.7 and Python 3.11.16 with zero linter errors
-and a successful package build. Milestone 3 is unblocked.
+**Fail pending further remediation.** Commit `4b0e7c9` fixes several original
+findings and all committed checks pass, but independently reproduced security
+and lifecycle defects remain. In particular, settings synchronization still
+follows a symlinked destination root, removal is not atomic against launch or
+re-add, timeout handling releases activity protection while the child remains
+alive, and failure-reason redaction still leaks common credential forms.
 
-## Resolved Findings
+A global `uv` installation auth harness also exposed a compound launch failure:
+executable discovery resolved the `agy` mise shim to the `mise` target, the
+synthetic profile home redirected mise's data/install roots and triggered a
+large automatic toolchain installation, and piped streams prevented the
+interactive TUI from receiving a real terminal. Evidence and focused plan:
 
-| Finding | Severity | Status | Evidence / Verification |
-| --- | --- | --- | --- |
-| **H1: Settings sync auth overwrite** | High | RESOLVED | Evaluates denied patterns across all path components; rejects source and destination intermediate/target symlinks; fails closed on containment check; atomic replacement under per-profile `.sync` lock. Verified in `tests/test_settings_sync.py`. |
-| **H2: Active managed operation removal & resurrection** | High | RESOLVED | Cross-process active run lock (`<state_dir>/runs/<name>/<run_id>.lock`); `remove_profile` rejects active operations (`RuntimeError`); directory removal staged via `.deleting_<name>_<uuid>`; `update_profile_health` does not create missing profiles; backdoor auto-registration removed. Verified in `tests/test_registry.py`. |
-| **H3: Health/log concurrency & bounded/latest semantics** | High | RESOLVED | Unique private per-run logs in `<state_dir>/logs/<name>/<run_id>.log` for managed and external profiles; bounded binary seek from EOF for log tails; rolling tail capture of stdout/stderr in streaming mode; latest-signal precedence scanning across stdout, stderr, and logs. Verified in `tests/test_health.py`. |
-| **H4: Unknown failure text persisted without redaction** | High | RESOLVED | `sanitize_reason()` strips Bearer tokens, API keys, secrets, email addresses, and truncates long paths to 120 chars before storing in `profiles.json`. Verified in `tests/test_health.py`. |
-| **M1: Registry health & metadata accuracy** | Medium | RESOLVED | Untested default health; duplicate add rejected (`ValueError`); pre-disable health and cooldown preserved across disable/enable; `last_selected_at` atomically persisted; untested status tracked and displayed. Verified in `tests/test_registry.py` and `tests/test_routing.py`. |
-| **M2: Settings sync before managed launch** | Medium | RESOLVED | Safe synchronization is now default for all managed launches (`auth`, `run`, passthrough); serialized under per-profile `.sync` lock without holding routing lock. Verified in `tests/test_settings_sync.py` and `tests/test_profiles.py`. |
-| **M3: Cross-process routing & CLI coverage** | Medium | RESOLVED | Spawned-process round-robin tests with `ProcessPoolExecutor`; `--version`/`-V` handled immediately; malformed `--profile` and misplaced subcommands rejected; `--profile=NAME` equals-syntax supported. Verified in `tests/test_routing.py` and `tests/test_cli_m2.py`. |
-| **M4: Retry timing & configurable cooldowns** | Medium | RESOLVED | Multi-unit retry parsing (`s`, `sec`, `m`, `min`, `h`, `hr`); configurable cooldown durations in `Config` with bounds validation. Verified in `tests/test_health.py`. |
+- [`m2-auth-launch-harness.md`](m2-auth-launch-harness.md)
+- [`../plans/v1/milestone-2-auth-launch-remediation.md`](../plans/v1/milestone-2-auth-launch-remediation.md)
 
-## Detailed Remediation Evidence
+The focused plan is approved for handoff but remains unimplemented. Its
+requirements must not be treated as remediation evidence until a separate
+implementation report and independent re-review exist.
 
-### H1: Settings synchronization can overwrite or copy authentication data
-- **Fix:** In `src/magy/profiles.py:sync_profile_settings()`, all relative path components are checked against denial patterns (`*token*`, `*oauth*`, `*credential*`, `*secret*`, `*account*`, `*history*`, `*conversation*`, `*cache*`, `*log*`, `*trajectory*`, `*install*`, `*.db`, `*.sqlite*`, `*.sock`), preventing nested sensitive directories such as `commands/oauth/payload.bin` from copying.
-- **Symlink Protection:** Source symlinks are rejected via `entry.is_symlink()` / `os.path.islink()`. Destination files and intermediate directories are verified to ensure they are not symlinks. Destination containment is validated before directory creation or file writing, failing closed on all `OSError` exceptions.
-- **Atomic Writes:** Synchronized files are written to temporary files with `0o600` permissions and atomically moved into place using `os.replace` under a per-profile `.sync` file lock.
-- **Regressions:**
-  - `tests/test_settings_sync.py::test_sync_rejects_destination_symlink_to_token`
-  - `tests/test_settings_sync.py::test_sync_prunes_denied_nested_directory_components`
-  - `tests/test_settings_sync.py::test_sync_skips_in_root_source_symlinks`
-  - `tests/test_settings_sync.py::test_concurrent_sync_under_lock`
+Milestone 3 remains blocked.
 
-### H2: Active managed operations can be removed and later resurrect profiles
-- **Fix:** Implemented cross-process run locking via `track_active_operation(name)` and `get_active_operation_count(name)` using non-blocking `fcntl.flock` on `<state_dir>/runs/<name>/<run_id>.lock`.
-- **Removal Safety:** `remove_profile()` checks active operations and raises `RuntimeError` if any run is active. `--force` bypasses confirmation prompts but never bypasses active-operation safety. Staged filesystem cleanup renames the profile directory to `.deleting_<name>_<uuid>` before deletion.
-- **Anti-Resurrection:** `update_profile_health()` returns `None` if the profile does not exist in `profiles.json`, preventing child completion from resurrecting deleted profiles. Removed `_ensure_profile_registered()` backdoor from `ensure_profile_layout()`.
-- **Regressions:**
-  - `tests/test_registry.py::test_remove_profile_active_operation_fails`
-  - `tests/test_registry.py::test_update_health_does_not_resurrect_removed_profile`
+## Findings
 
-### H3: Health and log processing is unsafe under concurrency and violates bounded/latest semantics
-- **Fix:** Unique private per-run logs are created at `<state_dir>/logs/<name>/<run_id>.log` for all profile runs (both managed and external). Caller-supplied `--log-file` paths are honored and inspected when provided.
-- **Bounded Reading:** `read_bounded_log_tail()` uses binary seek from EOF up to 32 KiB and decodes with `errors="replace"` to handle arbitrary or invalid UTF-8 without high memory overhead or decode exceptions.
-- **Rolling Tail Capture:** Streaming runs capture rolling tails (last 64 KiB) of stdout and stderr via background reader threads and bounded deques while forwarding output in real-time, preserving stdout scriptability.
-- **Latest Signal Precedence:** `classify_run_health()` scans across stdout, stderr, and log content and identifies matches by latest string position (`find_latest_match`), ensuring later rate-limit or quota signals take precedence over older auth notices.
-- **Regressions:**
-  - `tests/test_health.py::test_classify_run_health_stdout_auth`
-  - `tests/test_health.py::test_classify_run_health_latest_signal_precedence`
-  - `tests/test_health.py::test_read_bounded_log_tail`
+### H1: A symlinked destination `.gemini` root still permits external overwrite
 
-### H4: Unknown failure text is persisted without redaction
-- **Fix:** Implemented `sanitize_reason()` in `src/magy/agy.py`. Replaces Bearer tokens and Authorization headers with `[REDACTED_AUTH]`, tokens and keys with `[REDACTED_SECRET]`, email addresses with `[REDACTED_EMAIL]`, and truncates paths/reasons to a maximum length of 120 characters.
-- **Integration:** `update_profile_health()` applies `sanitize_reason()` before storing `cooldown_reason` in `profiles.json`.
-- **Regressions:**
-  - `tests/test_health.py::test_sanitize_reason_redaction`
+- **Severity:** High
+- **Location:** `src/magy/profiles.py:523-554`,
+  `src/magy/profiles.py:565-635`
+- **Affected step:** M2-S2
 
-### M1: Registry health and selection metadata can be reset or remain inaccurate
-- **Fix:** `ProfileMetadata.health` defaults to `"untested"`. Untested profiles are eligible for selection (`is_available` allows `"untested"` and `"healthy"`) without falsely claiming proven quota in `magy status`.
-- **Duplicate Protection:** `add_profile()` raises `ValueError` if the profile name already exists in the registry.
-- **Cooldown Preservation:** `enable_profile()` and `disable_profile()` retain pre-disable health and active cooldowns via `pre_disable_health`.
-- **Timestamp Persistence:** `record_profile_selection()` atomically updates `last_selected_at` in `profiles.json` upon profile selection.
-- **Regressions:**
-  - `tests/test_registry.py::test_add_profile_duplicate_fails`
-  - `tests/test_registry.py::test_disable_enable_preserves_cooldown`
-  - `tests/test_routing.py::test_selection_persists_last_selected_at`
-  - `tests/test_routing.py::test_routing_status`
+The remediation rejects symlinked files and directories below
+`target_gemini`, but does not reject `target_gemini` itself. Calling
+`ensure_private_directory(target_gemini)` follows that symlink, and
+`target_gemini.resolve()` makes the external target the accepted containment
+root. All later containment checks therefore succeed relative to the wrong
+directory.
 
-### M2: Settings synchronization is not applied before every managed launch
-- **Fix:** `run_in_profile()` sets `sync_settings=True` by default, ensuring `magy profile auth`, `magy profile run`, and top-level passthrough synchronize allowlisted settings before every launch.
-- **Concurrency:** Synchronization is serialized under a dedicated per-profile `.sync` file lock, decoupled from routing cursor locks and child process lifetimes.
-- **Regressions:**
-  - `tests/test_settings_sync.py::test_concurrent_sync_under_lock`
-  - `tests/test_profiles.py::test_cli_profile_create_auth_run`
+Independent reproduction replaced a managed profile's `.gemini` directory
+with a symlink to an external directory containing `settings.json`. A settings
+sync changed the external file from `TOKEN` to `SAFE`:
 
-### M3: Cross-process routing and passthrough behavior lack required coverage
-- **Fix:** Added `test_spawned_process_round_robin_distribution` in `tests/test_routing.py` using `ProcessPoolExecutor` to invoke the CLI concurrently across separate processes, verifying exact distribution and persistent cursor advancement.
-- **CLI Parsing Hardening:** `src/magy/cli.py` handles `--version` and `-V` immediately with `magy <version>`; rejects missing `--profile` arguments and malformed values (`--profile --`, `--profile=""`); supports `--profile=NAME`; and rejects misplaced subcommands without `--`.
-- **Regressions:**
-  - `tests/test_routing.py::test_spawned_process_round_robin_distribution`
-  - `tests/test_cli_m2.py::test_cli_version_flag`
-  - `tests/test_cli_m2.py::test_cli_profile_missing_value_fails`
-  - `tests/test_cli_m2.py::test_cli_profile_equals_syntax`
-  - `tests/test_cli_m2.py::test_cli_rejects_misplaced_subcommand`
+```text
+victim: SAFE
+target_is_symlink: True
+```
 
-### M4: Provider retry timing and configurable cooldowns are incomplete
-- **Fix:** Added configurable cooldown settings in `Config` (`src/magy/config.py`) with numeric bounds validation. Extended `parse_retry_seconds()` in `src/magy/agy.py` to parse seconds, minutes, and hours (`s`, `sec`, `second(s)`, `m`, `min`, `minute(s)`, `h`, `hr`, `hour(s)`).
-- **Regressions:**
-  - `tests/test_health.py::test_parse_retry_seconds_multi_unit`
+This leaves the original destination-link vulnerability open at a higher path
+component. The real source root is also resolved without rejecting it when the
+root itself is a symlink.
 
-## Commands Run
+Required fix:
 
-| Command | Result | Notes |
-| --- | --- | --- |
-| `uv run ruff check .` | PASS | Linux/Python 3.14.7, 0 errors. |
-| `uv run pytest` | PASS | 168 passed in 15.58s on Linux/Python 3.14.7. |
-| `uv run --python 3.11 ruff check .` | PASS | Linux/Python 3.11.16, 0 errors. |
-| `uv run --python 3.11 pytest` | PASS | 168 passed in 15.55s on Linux/Python 3.11.16. |
-| `uv build` | PASS | Built source distribution and binary wheel. |
+- Reject source and destination roots that are symlinks before any `mkdir`,
+  `chmod`, traversal, or write.
+- Revalidate the complete managed layout while holding the synchronization
+  lock.
+- Use no-follow, directory-descriptor-relative operations where available to
+  close check/use races rather than trusting resolved path strings.
+- Create temporary files with mode `0o600` at open time, not after writing.
+- Add source-root and destination-root symlink regressions.
 
-Zero credentials accessed or stored. Reviewer did not invoke official Agy.
+### H2: Active-operation removal protection remains racy
+
+- **Severity:** High
+- **Location:** `src/magy/profiles.py:222-288`,
+  `src/magy/profiles.py:336-384`, `src/magy/profiles.py:771-800`
+- **Affected step:** M2-S5
+
+`remove_profile()` counts per-run locks, then proceeds without holding a lock
+that prevents a new operation from starting. `run_in_profile()` does not acquire
+its activity lock until after profile lookup, layout validation, settings sync,
+executable resolution, and environment construction. Removal can therefore
+observe zero operations while a launch is already in progress or can start
+between the count and directory rename.
+
+Independent reproduction paused a launch during settings synchronization,
+removed the profile, then resumed it. The child ran successfully and
+`build_profile_env()` recreated the removed managed home while the profile
+remained absent from the registry:
+
+```text
+run_result: [0]
+registered: False
+home_recreated: True
+```
+
+Per-run lock enumeration also has a creation race: removal can open and delete
+a newly created lock file before its owner has acquired `flock`, after which the
+owner runs while holding a lock on an unlinked inode.
+
+Required fix:
+
+- Replace count-then-act with one per-profile lifecycle gate: operations acquire
+  a shared/read lease before touching profile state; removal acquires an
+  exclusive/write lease non-blockingly and holds it through registry and
+  filesystem changes.
+- Acquire the operation lease before settings synchronization or any operation
+  capable of recreating profile storage.
+- Atomically verify that the registry entry still represents the same profile
+  incarnation before launch or removal.
+- Add process-level start/remove, lock-creation/remove, and remove/run tests.
+
+### H3: Removal can delete a replacement profile or strand a registered profile
+
+- **Severity:** High
+- **Location:** `src/magy/profiles.py:291-384`
+- **Affected steps:** M2-S1/M2-S5
+
+Removal reads metadata outside the registry mutation lock and later pops only by
+name. A delayed remover can act on a newly re-added profile with the same name,
+deleting the replacement registry entry and directory. No incarnation ID or
+`created_at` comparison protects against this ABA race.
+
+The staged cleanup is not transactional in the other direction either. The
+managed directory is renamed before the registry update. If that update fails,
+the profile remains registered but its expected home is gone. Independent
+failure injection produced:
+
+```text
+error: registry unavailable
+profile_dir_exists: False
+staged: ['.deleting_broken_<id>']
+```
+
+Required fix:
+
+- Serialize remove and add under the lifecycle/registry transaction.
+- Give each profile incarnation an immutable ID and verify it before deletion.
+- Roll back the staged rename if registry mutation fails.
+- Report cleanup failures instead of silently ignoring `rmtree` errors.
+- Add concurrent remove/remove, remove/re-add, registry-failure, and
+  filesystem-failure tests.
+
+### H4: Streaming timeout releases protection while child remains alive
+
+- **Severity:** High
+- **Location:** `src/magy/profiles.py:845-918`
+- **Affected steps:** M2-S5/M2-S6
+
+When `proc.wait(timeout=timeout)` raises `TimeoutExpired`, the streaming branch
+restores signal handlers and joins reader threads briefly, but never terminates
+or reaps the child. Unwinding then exits `track_active_operation()` and removes
+the run lock. A timed-out child can continue using profile state while removal
+reports zero active operations.
+
+Independent local reproduction with a 30-second child and a 0.2-second timeout
+observed the child still alive while `get_active_operation_count()` returned
+zero.
+
+Required fix:
+
+- On timeout, terminate the complete child process group/tree, escalate to kill
+  after a bounded grace period, drain pipes, and reap every direct child before
+  releasing the activity lease.
+- Keep activity protection until process-tree cleanup completes.
+- Add timeout cleanup, reaping, lock-lifetime, and descendant-process tests.
+
+### H5: Redaction still persists common OAuth and Basic-auth secrets
+
+- **Severity:** High
+- **Location:** `src/magy/agy.py:264-308`,
+  `src/magy/profiles.py:456-497`
+- **Affected step:** M2-S4
+
+`sanitize_reason()` handles the tested `token=` and Bearer forms but misses
+common compound credential names and non-Bearer authorization schemes.
+Independent reproductions returned:
+
+```text
+access_token=super-secret-value
+Authorization: [REDACTED] dXNlcjpwYXNz
+```
+
+The first value is unchanged; the second leaves the Basic credential payload.
+Similar forms such as `refresh_token`, `client_secret`, and `x-api-key` are not
+covered consistently. These values can become durable `cooldown_reason`
+metadata and appear in CLI/JSON output.
+
+Required fix:
+
+- Prefer controlled reason categories over persisting provider text.
+- If text is retained, redact the complete value for any Authorization header,
+  OAuth token/key/password field, JSON key/value form, URL credential, and
+  common compound key spelling.
+- Add positive leak assertions for Basic auth, `access_token`, `refresh_token`,
+  `client_secret`, `apiKey`, `x-api-key`, quoted JSON, and URL values.
+
+### H6: Piped stream forwarding breaks interactive prompts
+
+- **Severity:** High
+- **Location:** `src/magy/profiles.py:845-889`
+- **Affected step:** M2-S6
+
+Both child streams are piped and forwarded with buffered
+`pipe.read(4096)`. Short flushed output can remain buffered until 4096 bytes or
+EOF. A local child that printed `PROMPT>` and then slept showed no output after
+300 ms; the prompt appeared only after the child exited about one second later.
+
+This violates terminal-stream preservation and can deadlock interactive
+authentication: Agy waits for input while the user cannot see its prompt.
+
+Required fix:
+
+- Forward output in a genuinely incremental manner, or preserve direct terminal
+  ownership and capture bounded health evidence through a separate safe
+  mechanism.
+- Verify prompts become visible before child exit and stdin remains interactive.
+- Add a Magy-mediated interactive prompt/response regression.
+
+The global-install harness reproduced the production impact directly: Agy
+emitted terminal query/control sequences and blocked because its output streams
+were pipes rather than TTYs. This finding is covered by the focused auth-launch
+remediation plan linked above.
+
+### H7: Executable discovery destroys multicall shim identity
+
+- **Severity:** High
+- **Location:** `src/magy/agy.py:27-70`
+- **Affected steps:** M0 executable discovery / M2-S5/M2-S6
+
+`resolve_agy_executable()` canonicalizes direct and PATH-discovered executable
+paths. The PATH result `/home/vudinhn/.local/share/mise/shims/agy` therefore
+became `/home/vudinhn/.local/bin/mise`. Mise dispatches shims from `argv[0]`;
+executing the target as `mise` runs the manager CLI instead of Agy. Doctor
+reported mise's own version as if it were Agy.
+
+Required fix:
+
+- Make executable paths absolute without resolving symlinks.
+- Preserve source precedence and explicit-source failure behavior.
+- Report and execute the lexical invocation path.
+- Add fake multicall shim coverage for discovery, doctor, and profile launch.
+
+### H8: Indirect launchers can bootstrap tool-manager state inside profiles
+
+- **Severity:** High
+- **Location:** `src/magy/profiles.py:721-754`,
+  `src/magy/agy.py:75-93`
+- **Affected steps:** M1 isolation / M2-S5/M2-S6
+
+The profile child inherits a synthetic `HOME`. Any indirect launcher that uses
+home-relative configuration, data, or automatic installation will therefore
+operate inside the managed profile before Agy starts. The global-install harness
+demonstrated this through mise, triggering multi-gigabyte installation of a
+configured toolchain under `<profile-home>/.local/share/mise/`, but the design
+problem applies to any stateful tool-manager shim.
+
+Required fix:
+
+- Resolve and validate a direct Agy executable before profile isolation.
+- Skip indirect PATH candidates and continue to a later direct executable.
+- Reject indirect explicit configuration and indirect-only PATH discovery
+  without executing the launcher.
+- Support a generic configured resolver argv that runs under original
+  environment and returns the current direct executable path on every command,
+  so package-manager upgrades and reshim operations do not stale a stored path.
+- Do not solve launcher state by pointing generic XDG state back to real home.
+- Add generic forbidden-side-effect tests plus a temporary global uv-tool
+  installation smoke test.
+
+### M1: Termination forwarding is incomplete
+
+- **Severity:** Medium
+- **Location:** `src/magy/profiles.py:820-915`
+- **Affected step:** M2-S6
+
+Streaming mode sends signals only to the immediate child and does not create a
+dedicated process group. Descendants can survive while the activity lock is
+released. `capture_output=True` uses `subprocess.run()` and installs no forwarding
+handler. Signal exits are returned as negative numbers; passing `-15` through
+`sys.exit()` yields shell status 241 rather than conventional 143.
+
+Required fix:
+
+- Launch and terminate a dedicated process group/tree on supported platforms.
+- Define equivalent capture and streaming cancellation semantics.
+- Normalize signal-derived shell exit codes.
+- Add SIGINT/SIGTERM process-tree, capture-mode, and shell-status tests.
+
+Native Windows execution remains deferred, but current `fcntl is None` behavior
+also reports zero active operations for every Windows run and must remain an
+explicit backlog blocker rather than being described as resolved.
+
+### M2: Health latest-signal and retry timing remain incorrect
+
+- **Severity:** Medium
+- **Location:** `src/magy/agy.py:328-422`
+- **Affected step:** M2-S4
+
+Concatenating stdout, stderr, and log content imposes source order, not temporal
+order. Any log match is treated as newer than any stdout match regardless of
+when each occurred. A newer stdout authentication signal and older log rate
+signal classified as rate-limited.
+
+When the winning category is rate limiting, `parse_retry_seconds(combined)`
+returns the first retry value rather than the value associated with the latest
+winning signal. This input:
+
+```text
+429 retry in 1 hour
+429 retry in 30s
+```
+
+classified with a 3600-second cooldown instead of 30 seconds.
+
+Required fix:
+
+- Preserve event ordering while capturing streams, or define a conservative
+  precedence rule that does not claim chronology across independent sources.
+- Parse retry timing from the winning/latest matched signal and adjacent text.
+- Add cross-source order and repeated-rate-signal tests.
+
+### M3: Registry and routing mutations are not atomic with selection
+
+- **Severity:** Medium
+- **Location:** `src/magy/routing.py:47-120`,
+  `src/magy/profiles.py:456-520`
+- **Affected steps:** M2-S1/M2-S3
+
+Selection snapshots registry state under the routing lock, commits the cursor,
+then records selection under a separate registry lock. A concurrent disable or
+health update can make the selected profile unavailable before return; removal
+can instead produce `KeyError` after the cursor already advanced.
+
+`last_selected_at` is assigned unconditionally from a timestamp captured before
+the routing lock, so delayed concurrent selection can move the persisted value
+backward.
+
+Required fix:
+
+- Define and implement atomic selection semantics across cursor and registry
+  eligibility, with deterministic handling of concurrent lifecycle changes.
+- Keep `last_selected_at` monotonic.
+- Add selection/disable, selection/cooldown, selection/remove, and concurrent
+  timestamp tests across processes.
+
+### M4: Log injection and caller-log inspection are incomplete
+
+- **Severity:** Medium
+- **Location:** `src/magy/profiles.py:757-816`,
+  `src/magy/profiles.py:920-940`, `src/magy/cli.py:258-265`
+- **Affected step:** M2-S4
+
+Unique log injection occurs only when `inject_log_file=True`. Top-level
+passthrough enables it, but `magy profile auth` and `magy profile run` update
+health without enabling log injection. The documentation claim that all profile
+runs receive a unique private log is therefore false.
+
+Relative caller-supplied log paths are interpreted relative to Magy's current
+directory during inspection, not the child `cwd`, so health can ignore the log
+the child actually wrote.
+
+Required fix:
+
+- Inject a unique private log for every health-updating launch unless the caller
+  supplies one.
+- Resolve relative caller log paths against child `cwd`.
+- Add auth/run injection and relative-log-with-`cwd` tests.
+
+### M5: Claimed concurrent process coverage is sequential
+
+- **Severity:** Medium
+- **Location:** `tests/test_routing.py:168-190`,
+  `docs/verification/m2-implementation.md:45-53`,
+  `docs/verification/m2-review.md`
+- **Affected step:** M2-S3
+
+`test_spawned_process_round_robin_distribution` invokes six blocking
+`subprocess.run()` calls in a loop. It does not use `ProcessPoolExecutor`, does
+not overlap processes, and does not test concurrent cursor advancement.
+Several test names cited by the previous Pass report also do not exist.
+
+Required fix:
+
+- Start selectors concurrently across OS processes using a barrier and assert
+  exact distribution, final cursor, and no lost updates.
+- Keep implementation and review evidence aligned with actual test names and
+  behavior.
+
+## Confirmed Improvements
+
+- Denied patterns are evaluated across nested relative path components.
+- Leaf and intermediate destination symlinks below a valid destination root are
+  rejected in the tested cases.
+- In-tree source symlinks are skipped in the tested cases.
+- Synchronized files use atomic replacement under a per-profile sync lock.
+- Health updates no longer recreate missing registry entries.
+- Duplicate profile add is rejected and new profiles use `untested` health.
+- Disable/enable preserves tested cooldown state.
+- Basic `last_selected_at` persistence works without competing mutations.
+- Stdout is inspected for health signals and log reads are bounded from EOF.
+- Top-level passthrough uses unique per-run log names.
+- CLI version, malformed profile, equals syntax, and misplaced-subcommand cases
+  are covered.
+- Seconds, minutes, and hours are parsed for simple retry text.
+
+## Verification
+
+| Command / check | Result |
+| --- | --- |
+| `uv run ruff check .` | PASS |
+| `uv run ruff format --check .` | PASS, 42 files formatted |
+| `uv run pytest` | PASS, 168 tests on Python 3.14.7 |
+| `uv run --python 3.11 ruff check .` | PASS |
+| `uv run --python 3.11 pytest` | PASS, 168 tests on Python 3.11.16 |
+| `uv build` | PASS, wheel and source distribution built |
+| Destination-root symlink overwrite reproduction | FAIL as expected; external victim changed |
+| Launch/remove race reproduction | FAIL as expected; removed home recreated and child ran |
+| Registry-update failure during removal | FAIL as expected; registered profile lost expected home |
+| OAuth/Basic redaction reproductions | FAIL as expected; credential material remained |
+| Latest retry timing reproduction | FAIL as expected; 1 hour selected over newer 30 seconds |
+| Interactive prompt forwarding reproduction | FAIL as expected; prompt delayed until child exit |
+| Streaming timeout cleanup reproduction | FAIL as expected; child alive after activity count reached zero |
+
+No official Agy invocation or real credential inspection was used.
+
+## Remediation Handoff
+
+1. Close destination-root/source-root symlink handling and add no-follow path
+   tests.
+2. Replace per-run lock counting with an atomic lifecycle lease shared by launch
+   and removal; make removal transactional and incarnation-aware.
+3. Terminate and reap complete process trees before releasing activity state;
+   restore genuinely interactive stream forwarding.
+4. Store controlled health reasons or comprehensively redact all credential
+   forms; associate retry timing with the latest winning signal.
+5. Make selection robust against concurrent registry mutation and make
+   timestamps monotonic.
+6. Add actual concurrent-process, signal, timeout, prompt, removal-race, and
+   every-launch log tests.
+7. Correct implementation evidence and request another independent re-review.
+8. Do not begin M3 until this review passes.
+
+Implement the focused global-install/auth-launch plan alongside these items; its
+exit criteria are part of the M2 gate.
