@@ -187,3 +187,115 @@ def collect_diagnostics() -> AgyDiagnostics:
         agy_version=agy_ver,
         missing_prerequisites=missing,
     )
+
+
+@dataclass
+class HealthClassification:
+    health: str
+    cooldown_seconds: float | None = None
+    reason: str | None = None
+    is_success: bool = False
+
+
+def classify_run_health(
+    exit_code: int,
+    stdout: str = "",
+    stderr: str = "",
+    log_content: str = "",
+) -> HealthClassification:
+    """Classify the latest relevant health signal from execution results."""
+    if exit_code == 0:
+        return HealthClassification(health="healthy", is_success=True)
+
+    # Take bounded recent stderr and log content (last 32KB each)
+    bounded_stderr = stderr[-32768:] if len(stderr) > 32768 else stderr
+    bounded_log = log_content[-32768:] if len(log_content) > 32768 else log_content
+    combined = f"{bounded_stderr}\n{bounded_log}".lower()
+
+    # 1. Auth required
+    auth_patterns = (
+        "please sign in",
+        "authentication required",
+        "auth login",
+        "credentials expired",
+        "unauthenticated",
+        "token expired",
+        "invalid credentials",
+        "authentication failed",
+    )
+    if any(p in combined for p in auth_patterns):
+        return HealthClassification(
+            health="auth-required",
+            cooldown_seconds=86400.0,
+            reason="Authentication required",
+        )
+
+    # 2. Rate limit
+    rate_patterns = (
+        "429",
+        "rate limit reached",
+        "resource exhausted: rate limit",
+        "resource_exhausted",
+        "too many requests",
+        "rate_limit_exceeded",
+    )
+    if any(p in combined for p in rate_patterns):
+        import re
+
+        pattern = (
+            r"(?:retry|try again) (?:in|after) "
+            r"([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec|seconds)?"
+        )
+        retry_match = re.search(pattern, combined)
+        if retry_match:
+            cooldown = float(retry_match.group(1))
+        else:
+            cooldown = 60.0
+        return HealthClassification(
+            health="rate-limited",
+            cooldown_seconds=cooldown,
+            reason=f"Rate limit reached (retry in {cooldown:.0f}s)",
+        )
+
+    # 3. Quota exhausted
+    quota_patterns = (
+        "exceeded your current quota",
+        "quota exceeded",
+        "check your plan and billing details",
+        "insufficient_quota",
+        "out of quota",
+    )
+    if any(p in combined for p in quota_patterns):
+        return HealthClassification(
+            health="quota-exhausted",
+            cooldown_seconds=3600.0,
+            reason="Quota exhausted",
+        )
+
+    # 4. Timeout
+    timeout_patterns = (
+        "request timed out",
+        "deadline exceeded",
+        "timeout after",
+        "timed out",
+    )
+    if any(p in combined for p in timeout_patterns):
+        return HealthClassification(
+            health="timeout",
+            cooldown_seconds=30.0,
+            reason="Request timed out",
+        )
+
+    # 5. Unknown failure
+    first_line = ""
+    for line in stderr.splitlines():
+        line_clean = line.strip()
+        if line_clean and not line_clean.startswith("Traceback"):
+            first_line = line_clean[:120]
+            break
+    reason = first_line or f"Command failed with exit code {exit_code}"
+    return HealthClassification(
+        health="unknown-failure",
+        cooldown_seconds=15.0,
+        reason=reason,
+    )

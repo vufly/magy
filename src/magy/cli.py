@@ -1,5 +1,7 @@
 import argparse
+import json
 import sys
+import time
 
 from magy.agy import collect_diagnostics
 
@@ -11,8 +13,22 @@ def build_parser() -> argparse.ArgumentParser:
             "Magy: Multi-profile launcher and orchestrator for Antigravity (agy)."
         ),
     )
+    parser.add_argument(
+        "--profile",
+        dest="profile",
+        metavar="NAME",
+        help="Target profile name for command execution.",
+    )
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version="%(prog)s 0.1.0",
+    )
 
-    subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
+    subparsers = parser.add_subparsers(
+        dest="subcommand", help="Available subcommands"
+    )
 
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -24,6 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output diagnostics in JSON format.",
     )
 
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show profiles and routing status overview.",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output status in JSON format.",
+    )
+
     profile_parser = subparsers.add_parser(
         "profile",
         help="Manage and bootstrap profiles.",
@@ -32,8 +58,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="profile_action", help="Profile actions"
     )
 
+    add_p = profile_subparsers.add_parser(
+        "add", help="Add a new profile."
+    )
+    add_p.add_argument("name", help="Profile name.")
+    add_p.add_argument(
+        "--current",
+        action="store_true",
+        help="Register current user home directory as an external profile.",
+    )
+
     create_p = profile_subparsers.add_parser(
-        "create", help="Create a profile directory layout."
+        "create", help="Create a profile directory layout (alias to add)."
     )
     create_p.add_argument("name", help="Profile name.")
 
@@ -59,6 +95,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments forwarded to agy.",
     )
 
+    list_p = profile_subparsers.add_parser(
+        "list", help="List registered profiles."
+    )
+    list_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Output profiles in JSON format.",
+    )
+
+    show_p = profile_subparsers.add_parser(
+        "show", help="Show details for a specific profile."
+    )
+    show_p.add_argument("name", help="Profile name.")
+    show_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Output profile in JSON format.",
+    )
+
+    enable_p = profile_subparsers.add_parser(
+        "enable", help="Enable a profile."
+    )
+    enable_p.add_argument("name", help="Profile name.")
+
+    disable_p = profile_subparsers.add_parser(
+        "disable", help="Disable a profile."
+    )
+    disable_p.add_argument("name", help="Profile name.")
+
+    reset_p = profile_subparsers.add_parser(
+        "reset-health", help="Reset health of a profile to healthy."
+    )
+    reset_p.add_argument("name", help="Profile name.")
+
+    remove_p = profile_subparsers.add_parser(
+        "remove", help="Remove a profile."
+    )
+    remove_p.add_argument("name", help="Profile name.")
+    remove_p.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Force removal without interactive confirmation.",
+    )
+
     return parser
 
 
@@ -66,8 +147,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     diag = collect_diagnostics()
 
     if getattr(args, "json", False):
-        import json
-
         data = {
             "magy_version": diag.magy_version,
             "python_version": diag.python_version,
@@ -121,52 +200,292 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_status(args: argparse.Namespace) -> int:
+    from magy.profiles import load_profiles
+    from magy.routing import get_routing_status
+
+    status = get_routing_status()
+    profiles = load_profiles()
+
+    if getattr(args, "json", False):
+        out = {
+            **status,
+            "profiles": [p.to_dict() for p in profiles.values()],
+        }
+        print(json.dumps(out, indent=2))
+        return 0
+
+    print("Magy Status")
+    print("===========")
+    print(f"Total Profiles:    {status['total_profiles']}")
+    print(f"Enabled Profiles:  {status['enabled_profiles']}")
+    print(f"Healthy Profiles:  {status['healthy_profiles']}")
+    print(f"In Cooldown:       {status['cooldown_profiles']}")
+    print(f"Current Cursor:    {status['cursor'] or 'none'}")
+    return 0
+
+
+def format_cooldown(cooldown_until: float | None, reason: str | None) -> str:
+    if cooldown_until is None:
+        return "-"
+    remaining = max(0.0, cooldown_until - time.time())
+    reason_str = f" ({reason})" if reason else ""
+    return f"{remaining:.0f}s remaining{reason_str}"
+
+
+def handle_profile_command(
+    args: argparse.Namespace, remaining: list[str], parser: argparse.ArgumentParser
+) -> int:
+    from magy.profiles import (
+        add_profile,
+        disable_profile,
+        enable_profile,
+        ensure_profile_layout,
+        get_profile,
+        load_profiles,
+        remove_profile,
+        reset_profile_health,
+        run_in_profile,
+    )
+
+    action = args.profile_action
+    if action in ("add", "create"):
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        is_current = getattr(args, "current", False)
+        kind = "external" if is_current else "managed"
+        try:
+            if action == "create":
+                ensure_profile_layout(args.name)
+                print(f"Created profile '{args.name}'")
+            else:
+                add_profile(args.name, kind=kind)
+                print(f"Added {kind} profile '{args.name}'")
+            return 0
+        except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+            print(f"magy: error: {e}", file=sys.stderr)
+            return 1
+
+    elif action in ("auth", "run"):
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        extra = list(getattr(args, "extra_args", []))
+        if extra and extra[0] == "--":
+            extra = extra[1:]
+        try:
+            return run_in_profile(args.name, extra, update_health=True)
+        except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+            print(f"magy: error: {e}", file=sys.stderr)
+            return 1
+
+    elif action == "list":
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        profiles = load_profiles()
+        if getattr(args, "json", False):
+            print(json.dumps([p.to_dict() for p in profiles.values()], indent=2))
+            return 0
+
+        if not profiles:
+            print("No profiles registered.")
+            return 0
+
+        headers = (
+            f"{'NAME':<20} {'KIND':<10} {'ENABLED':<9} {'HEALTH':<16} {'COOLDOWN'}"
+        )
+        print(headers)
+        print("-" * len(headers))
+        for p in profiles.values():
+            en = "yes" if p.enabled else "no"
+            cd = format_cooldown(p.cooldown_until, p.cooldown_reason)
+            print(f"{p.name:<20} {p.kind:<10} {en:<9} {p.health:<16} {cd}")
+        return 0
+
+    elif action == "show":
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        try:
+            p = get_profile(args.name)
+            if p is None:
+                print(f"magy: error: Profile '{args.name}' not found", file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(json.dumps(p.to_dict(), indent=2))
+                return 0
+
+            print(f"Profile: {p.name}")
+            print(f"  Kind:             {p.kind}")
+            print(f"  Home:             {p.resolved_home()}")
+            print(f"  Enabled:          {'yes' if p.enabled else 'no'}")
+            print(f"  Health:           {p.health}")
+            if p.cooldown_until:
+                cd_str = format_cooldown(p.cooldown_until, p.cooldown_reason)
+                print(f"  Cooldown:         {cd_str}")
+            if p.last_selected_at:
+                print(f"  Last Selected:    {time.ctime(p.last_selected_at)}")
+            if p.last_success_at:
+                print(f"  Last Success:     {time.ctime(p.last_success_at)}")
+            if p.last_failure_at:
+                print(f"  Last Failure:     {time.ctime(p.last_failure_at)}")
+            return 0
+        except ValueError as e:
+            print(f"magy: error: {e}", file=sys.stderr)
+            return 1
+
+    elif action == "enable":
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        try:
+            enable_profile(args.name)
+            print(f"Enabled profile '{args.name}'")
+            return 0
+        except (KeyError, ValueError) as e:
+            print(f"magy: error: {e}", file=sys.stderr)
+            return 1
+
+    elif action == "disable":
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        try:
+            disable_profile(args.name)
+            print(f"Disabled profile '{args.name}'")
+            return 0
+        except (KeyError, ValueError) as e:
+            print(f"magy: error: {e}", file=sys.stderr)
+            return 1
+
+    elif action == "reset-health":
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        try:
+            reset_profile_health(args.name)
+            print(f"Reset health for profile '{args.name}' to healthy")
+            return 0
+        except (KeyError, ValueError) as e:
+            print(f"magy: error: {e}", file=sys.stderr)
+            return 1
+
+    elif action == "remove":
+        if remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+        force = getattr(args, "force", False)
+        if not force:
+            if not sys.stdin.isatty():
+                print(
+                    f"magy: error: Profile removal of '{args.name}' "
+                    "requires --force in noninteractive mode",
+                    file=sys.stderr,
+                )
+                return 1
+            prompt_msg = (
+                f"Are you sure you want to remove profile '{args.name}'? [y/N]: "
+            )
+            confirm = input(prompt_msg)
+            if confirm.strip().lower() not in ("y", "yes"):
+                print("Cancelled.")
+                return 0
+        try:
+            remove_profile(args.name, force=force)
+            print(f"Removed profile '{args.name}'")
+            return 0
+        except (KeyError, ValueError) as e:
+            print(f"magy: error: {e}", file=sys.stderr)
+            return 1
+
+    else:
+        parser.parse_args(["profile", "--help"])
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
     parser = build_parser()
-    args, remaining = parser.parse_known_args(argv)
 
-    if args.subcommand == "doctor":
-        if remaining:
-            parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
-        return run_doctor(args)
+    # Fast check: help or version flags
+    if not argv:
+        parser.print_help()
+        return 0
 
-    if args.subcommand == "profile":
-        from magy.profiles import ensure_profile_layout, run_in_profile
+    if argv[0] in ("-h", "--help"):
+        parser.print_help()
+        return 0
 
-        if args.profile_action == "create":
+    # If first token is one of the known subcommands
+    if argv[0] in ("doctor", "status", "profile"):
+        args, remaining = parser.parse_known_args(argv)
+        if args.subcommand == "doctor":
             if remaining:
                 parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
-            try:
-                ensure_profile_layout(args.name)
-                print(f"Created profile '{args.name}'")
-                return 0
-            except (ValueError, PermissionError, OSError) as e:
-                print(f"magy: error: {e}", file=sys.stderr)
-                return 1
-
-        elif args.profile_action in ("auth", "run"):
+            return run_doctor(args)
+        elif args.subcommand == "status":
             if remaining:
                 parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
-            extra = list(getattr(args, "extra_args", []))
-            if extra and extra[0] == "--":
-                extra = extra[1:]
-            try:
-                return run_in_profile(args.name, extra)
-            except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
-                print(f"magy: error: {e}", file=sys.stderr)
-                return 1
+            return run_status(args)
+        elif args.subcommand == "profile":
+            return handle_profile_command(args, remaining, parser)
+
+    # Check if a subcommand appears later (misplaced subcommand)
+    for sub in ("doctor", "status", "profile"):
+        if sub in argv:
+            args, remaining = parser.parse_known_args(argv)
+            if remaining:
+                parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+
+    # Otherwise, this is Agy passthrough mode!
+    # Syntax:
+    #   magy [--profile NAME] [--] <agy arguments...>
+    target_profile: str | None = None
+    agy_args: list[str] = []
+
+    # Parse options before '--' delimiter
+    if "--" in argv:
+        dash_idx = argv.index("--")
+        pre_args = argv[:dash_idx]
+        post_args = argv[dash_idx + 1 :]
+
+        # Parse pre_args for --profile
+        pre_parser = argparse.ArgumentParser(prog="magy", add_help=False)
+        pre_parser.add_argument("--profile", dest="profile")
+        pre_args_parsed, pre_remaining = pre_parser.parse_known_args(pre_args)
+        if pre_remaining:
+            parser.error(f"Unrecognized arguments: {' '.join(pre_remaining)}")
+        target_profile = pre_args_parsed.profile
+        agy_args = list(post_args)
+    else:
+        # No '--' delimiter: check if starts with --profile
+        if len(argv) >= 2 and argv[0] == "--profile":
+            target_profile = argv[1]
+            agy_args = argv[2:]
         else:
-            parser.parse_args(["profile", "--help"])
-            return 0
+            agy_args = list(argv)
 
-    if remaining:
-        parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+    # Select profile (explicit or round-robin)
+    from magy.profiles import run_in_profile
+    from magy.routing import NoAvailableProfileError, select_profile
 
-    parser.print_help()
-    return 0
+    try:
+        selected = select_profile(explicit_name=target_profile)
+    except (ValueError, NoAvailableProfileError) as e:
+        print(f"magy: error: {e}", file=sys.stderr)
+        return 1
+
+    # Print selected profile to stderr so stdout remains scriptable
+    sys.stderr.write(f"[magy] using profile: {selected.name}\n")
+    sys.stderr.flush()
+
+    try:
+        return run_in_profile(
+            selected.name,
+            agy_args,
+            inject_log_file=True,
+            sync_settings=True,
+            update_health=True,
+        )
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+        print(f"magy: error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
