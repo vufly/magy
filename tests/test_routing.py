@@ -165,26 +165,93 @@ def test_selection_persists_last_selected_at():
     assert p2_after.last_selected_at == t1
 
 
+def _mp_worker(barrier, queue, state_dir, config_dir, data_dir):
+    import os
+
+    from magy.routing import select_profile
+
+    os.environ["MAGY_STATE_DIR"] = state_dir
+    os.environ["MAGY_CONFIG_DIR"] = config_dir
+    os.environ["MAGY_DATA_DIR"] = data_dir
+    try:
+        barrier.wait(timeout=5.0)
+        sel = select_profile()
+        queue.put(sel.name)
+    except Exception as e:
+        queue.put(f"ERROR: {e}")
+
+
 def test_spawned_process_round_robin_distribution():
-    import subprocess
-    import sys
+    """M5: Start selectors concurrently across OS processes using a barrier."""
+    import multiprocessing
+    import os
+    from collections import Counter
 
     add_profile("proc-1", kind="managed")
     add_profile("proc-2", kind="managed")
     add_profile("proc-3", kind="managed")
 
-    results = []
-    # Spawn 6 separate Python CLI processes running select_profile
-    cmd = [
-        sys.executable,
-        "-c",
-        "from magy.routing import select_profile; print(select_profile().name)",
-    ]
-    for _ in range(6):
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        results.append(res.stdout.strip())
+    ctx = multiprocessing.get_context("fork" if hasattr(os, "fork") else None)
+    barrier = ctx.Barrier(6)
+    queue = ctx.Queue()
 
-    assert results == ["proc-1", "proc-2", "proc-3", "proc-1", "proc-2", "proc-3"]
+    state_dir = os.environ["MAGY_STATE_DIR"]
+    config_dir = os.environ["MAGY_CONFIG_DIR"]
+    data_dir = os.environ["MAGY_DATA_DIR"]
+
+    procs = [
+        ctx.Process(
+            target=_mp_worker,
+            args=(barrier, queue, state_dir, config_dir, data_dir),
+        )
+        for _ in range(6)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=10.0)
+
+    results = []
+    while not queue.empty():
+        results.append(queue.get())
+
+    assert len(results) == 6
+    assert all(not r.startswith("ERROR") for r in results)
+    counts = Counter(results)
+    assert counts == {"proc-1": 2, "proc-2": 2, "proc-3": 2}
 
     status = get_routing_status()
-    assert status["cursor"] == "proc-3"
+    assert status["cursor"] in ("proc-1", "proc-2", "proc-3")
+
+
+def test_monotonic_last_selected_at():
+    """M3: Keep last_selected_at monotonic even if clock moves backward."""
+    add_profile("mono-p", kind="managed")
+    sel1 = select_profile(explicit_name="mono-p", now=2000.0)
+    assert sel1.last_selected_at == 2000.0
+
+    sel2 = select_profile(explicit_name="mono-p", now=1000.0)
+    assert sel2.last_selected_at == 2000.0
+
+
+def test_select_profile_retries_on_concurrent_removal(monkeypatch):
+    """M3: Deterministic handling of concurrent lifecycle changes."""
+    import magy.routing
+
+    add_profile("retry-p1", kind="managed")
+    add_profile("retry-p2", kind="managed")
+
+    original_record = magy.routing.record_profile_selection
+    first_call = True
+
+    def _flaky_record(name: str, selected_at: float | None = None):
+        nonlocal first_call
+        if first_call and name == "retry-p1":
+            first_call = False
+            raise KeyError(f"Profile '{name}' does not exist")
+        return original_record(name, selected_at)
+
+    monkeypatch.setattr("magy.routing.record_profile_selection", _flaky_record)
+
+    sel = select_profile(now=1000.0)
+    assert sel.name == "retry-p2"

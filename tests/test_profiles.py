@@ -11,8 +11,10 @@ import pytest
 from magy.cli import main
 from magy.profiles import (
     PROTECTED_ENV_VARS,
+    add_profile,
     build_profile_env,
     ensure_profile_layout,
+    get_profile,
     get_profile_dir,
     get_profile_home_dir,
     run_in_profile,
@@ -485,3 +487,128 @@ def test_profile_explicit_xdg_env_preserved(fake_agy, monkeypatch):
 
     inv = fake_agy.get_invocations()[0]["env"]
     assert inv["XDG_CONFIG_HOME"] == "/custom/config/path"
+
+
+def test_remove_profile_blocks_while_shared_lease_held():
+    """H2: Exclusive removal is blocked while any shared lease is active."""
+    from magy.profiles import (
+        acquire_profile_lease,
+        get_active_operation_count,
+        remove_profile,
+    )
+
+    add_profile("lease-block-p", kind="managed")
+    assert get_active_operation_count("lease-block-p") == 0
+
+    with acquire_profile_lease("lease-block-p", exclusive=False):
+        assert get_active_operation_count("lease-block-p") == 1
+        with pytest.raises(RuntimeError, match="active operations are running"):
+            remove_profile("lease-block-p")
+
+    assert get_active_operation_count("lease-block-p") == 0
+    remove_profile("lease-block-p")
+    assert get_profile("lease-block-p") is None
+
+
+def test_remove_profile_incarnation_aba_prevention(monkeypatch):
+    """H3: Verify incarnation_id prevents deleting replacement profile."""
+    import magy.profiles
+    from magy.profiles import get_registry_file_path, remove_profile, update_json
+
+    add_profile("aba-p", kind="managed")
+    orig = get_profile("aba-p")
+    assert orig is not None
+
+    # Simulate ABA: remove targets orig, but registry was modified concurrently
+    path = get_registry_file_path()
+
+    def _swap_incarnation(data):
+        data["profiles"]["aba-p"]["incarnation_id"] = "new-replacement-incarnation"
+        return data
+
+    update_json(path, _swap_incarnation)
+    monkeypatch.setattr(magy.profiles, "get_profile", lambda name: orig)
+
+    with pytest.raises(ValueError, match="incarnation mismatch"):
+        remove_profile("aba-p")
+
+
+def test_remove_profile_rollback_on_registry_failure(monkeypatch):
+    """H3: If registry update fails, staged directory rename is rolled back."""
+    import magy.profiles
+    from magy.profiles import get_profile_dir, remove_profile
+
+    add_profile("rollback-p", kind="managed")
+    p_dir = get_profile_dir("rollback-p")
+    assert p_dir.exists()
+
+    def _failing_update(path, update_fn, **kwargs):
+        raise OSError("Simulated disk error during registry update")
+
+    monkeypatch.setattr(magy.profiles, "update_json", _failing_update)
+
+    with pytest.raises(OSError, match="Simulated disk error"):
+        remove_profile("rollback-p")
+
+    # Profile directory must be restored / rolled back
+    assert p_dir.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Process group and signals for POSIX")
+def test_run_in_profile_timeout_kills_process_group(tmp_path, monkeypatch):
+    """H4: Timeout cleanly terminates child process tree and records health."""
+    import subprocess
+    import sys
+
+    from magy.profiles import get_active_operation_count, run_in_profile
+
+    script = tmp_path / "hang_with_child.py"
+    script.write_text(
+        "import subprocess, time, sys\n"
+        "cmd = [sys.executable, '-c', 'import time; time.sleep(30)']\n"
+        "proc = subprocess.Popen(cmd)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    add_profile("timeout-tree-p", kind="managed")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_in_profile(
+            "timeout-tree-p",
+            [str(script)],
+            executable=Path(sys.executable),
+            timeout=0.3,
+            update_health=True,
+        )
+
+    # Activity count must be 0 after timeout cleanup
+    assert get_active_operation_count("timeout-tree-p") == 0
+
+    # Profile health must be classified as timeout
+    p = get_profile("timeout-tree-p")
+    assert p.health == "timeout"
+    assert p.cooldown_until is not None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Signal exit codes for POSIX")
+def test_run_in_profile_signal_exit_code_normalized(tmp_path):
+    """M1: Return normalized 128 + signum for signal-terminated child."""
+    import sys
+
+    from magy.profiles import run_in_profile
+
+    script = tmp_path / "sig_exit.py"
+    script.write_text(
+        "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n",
+        encoding="utf-8",
+    )
+
+    add_profile("signal-exit-p", kind="managed")
+    ret = run_in_profile(
+        "signal-exit-p",
+        [str(script)],
+        executable=Path(sys.executable),
+    )
+    # Signal 15 -> 128 + 15 = 143
+    assert ret == 143

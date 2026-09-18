@@ -1,5 +1,6 @@
 import argparse
 import json
+import subprocess
 import sys
 import time
 
@@ -229,7 +230,6 @@ def handle_profile_command(
         add_profile,
         disable_profile,
         enable_profile,
-        ensure_profile_layout,
         get_profile,
         load_profiles,
         remove_profile,
@@ -245,7 +245,7 @@ def handle_profile_command(
         kind = "external" if is_current else "managed"
         try:
             if action == "create":
-                ensure_profile_layout(args.name)
+                add_profile(args.name, kind="managed")
                 print(f"Created profile '{args.name}'")
             else:
                 add_profile(args.name, kind=kind)
@@ -263,6 +263,12 @@ def handle_profile_command(
             extra = extra[1:]
         try:
             return run_in_profile(args.name, extra, update_health=True)
+        except subprocess.TimeoutExpired as e:
+            print(
+                f"magy: error: command timed out after {e.timeout} seconds",
+                file=sys.stderr,
+            )
+            return 124
         except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
             print(f"magy: error: {e}", file=sys.stderr)
             return 1
@@ -499,6 +505,12 @@ def main(argv: list[str] | None = None) -> int:
             sync_settings=True,
             update_health=True,
         )
+    except subprocess.TimeoutExpired as e:
+        print(
+            f"magy: error: command timed out after {e.timeout} seconds",
+            file=sys.stderr,
+        )
+        return 124
     except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
         print(f"magy: error: {e}", file=sys.stderr)
         return 1

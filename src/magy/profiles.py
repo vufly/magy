@@ -17,7 +17,7 @@ except ImportError:
     fcntl = None  # type: ignore
 
 from magy.agy import resolve_agy_executable
-from magy.config import get_data_dir, get_state_dir, load_config_result
+from magy.config import get_data_dir, get_state_dir, load_config, load_config_result
 from magy.storage import (
     atomic_write_json,
     ensure_private_directory,
@@ -82,6 +82,7 @@ class ProfileMetadata:
     home_dir: str | None = None
     enabled: bool = True
     created_at: float = field(default_factory=time.time)
+    incarnation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     last_selected_at: float | None = None
     last_success_at: float | None = None
     last_failure_at: float | None = None
@@ -118,6 +119,7 @@ class ProfileMetadata:
             home_dir=data.get("home_dir"),
             enabled=data.get("enabled", True),
             created_at=data.get("created_at", 0.0),
+            incarnation_id=data.get("incarnation_id") or uuid.uuid4().hex,
             last_selected_at=data.get("last_selected_at"),
             last_success_at=data.get("last_success_at"),
             last_failure_at=data.get("last_failure_at"),
@@ -217,28 +219,51 @@ def get_profile(name: str) -> ProfileMetadata | None:
     return profiles.get(validated)
 
 
-@contextmanager
-def track_active_operation(name: str):
-    """Track an active operation on a profile using a non-blocking lock."""
+def get_profile_lease_path(name: str) -> Path:
+    """Return path to the lifecycle lease file for a profile."""
     validated = validate_profile_name(name)
-    run_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
-    run_dir = get_state_dir() / "runs" / validated
-    run_dir.mkdir(parents=True, exist_ok=True)
-    ensure_private_directory(run_dir)
-    lock_file = run_dir / f"{run_id}.lock"
+    leases_dir = get_state_dir() / "leases"
+    leases_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(leases_dir)
+    return leases_dir / f"{validated}.lease"
 
-    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+
+@contextmanager
+def acquire_profile_lease(name: str, exclusive: bool = False):
+    """Acquire a lifecycle lease on a profile.
+
+    Shared (exclusive=False) lease is held during active profile operations.
+    Exclusive (exclusive=True) lease is held during profile removal or mutation.
+    """
+    validated = validate_profile_name(name)
+    lease_file = get_profile_lease_path(validated)
+
+    fd = os.open(str(lease_file), os.O_RDWR | os.O_CREAT, 0o600)
+    ensure_private_file(lease_file)
+
     if fcntl is not None:
+        lock_flags = (
+            (fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if exclusive
+            else (fcntl.LOCK_SH | fcntl.LOCK_NB)
+        )
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
+            fcntl.flock(fd, lock_flags)
+        except (BlockingIOError, OSError) as e:
             os.close(fd)
-            raise RuntimeError(
-                f"Could not acquire run lock for '{validated}': {e}"
-            ) from e
+            if exclusive:
+                raise RuntimeError(
+                    f"Cannot remove profile '{validated}': "
+                    "active operations are running"
+                ) from e
+            else:
+                raise RuntimeError(
+                    f"Cannot operate on profile '{validated}': "
+                    "profile is locked by another operation"
+                ) from e
 
     try:
-        yield run_id
+        yield
     finally:
         if fcntl is not None:
             try:
@@ -249,41 +274,41 @@ def track_active_operation(name: str):
             os.close(fd)
         except OSError:
             pass
-        try:
-            lock_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+
+
+@contextmanager
+def track_active_operation(name: str):
+    """Track an active operation on a profile using the shared lifecycle lease."""
+    validated = validate_profile_name(name)
+    run_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    with acquire_profile_lease(validated, exclusive=False):
+        yield run_id
 
 
 def get_active_operation_count(name: str) -> int:
-    """Return count of currently active operations for a profile."""
+    """Return count of currently active operations for a profile (0 or >=1)."""
     validated = validate_profile_name(name)
-    run_dir = get_state_dir() / "runs" / validated
-    if not run_dir.is_dir():
+    lease_file = get_profile_lease_path(validated)
+    if not lease_file.exists():
         return 0
-    active = 0
-    for lock_file in list(run_dir.glob("*.lock")):
-        try:
-            fd = os.open(str(lock_file), os.O_RDWR)
-        except OSError:
-            continue
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                # Lock acquired: previous process exited without cleaning up stale lock
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
-                try:
-                    lock_file.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            except (BlockingIOError, OSError):
-                # Lock is currently held by an active operation
-                os.close(fd)
-                active += 1
-        else:
-            os.close(fd)
-    return active
+
+    try:
+        fd = os.open(str(lease_file), os.O_RDWR)
+    except OSError:
+        return 0
+
+    if fcntl is None:
+        os.close(fd)
+        return 0
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        return 0
+    except (BlockingIOError, OSError):
+        os.close(fd)
+        return 1
 
 
 def add_profile(
@@ -295,40 +320,42 @@ def add_profile(
     validated = validate_profile_name(name)
     path = get_registry_file_path()
 
-    if kind == "managed":
-        ensure_profile_layout(validated)
-        actual_home = str(get_profile_home_dir(validated))
-    elif kind == "external":
-        if home_dir is None:
-            actual_home = str(Path.home())
+    with acquire_profile_lease(validated, exclusive=True):
+        if kind == "managed":
+            ensure_profile_layout(validated)
+            actual_home = str(get_profile_home_dir(validated))
+        elif kind == "external":
+            if home_dir is None:
+                actual_home = str(Path.home())
+            else:
+                actual_home = str(safe_expand_path(home_dir))
+            if not Path(actual_home).exists():
+                raise FileNotFoundError(
+                    f"External home directory does not exist: {actual_home}"
+                )
         else:
-            actual_home = str(safe_expand_path(home_dir))
-        if not Path(actual_home).exists():
-            raise FileNotFoundError(
-                f"External home directory does not exist: {actual_home}"
+            raise ValueError(f"Invalid profile kind: {kind}")
+
+        def _update(data: Any) -> Any:
+            if not isinstance(data, dict):
+                data = {"version": 1, "profiles": {}}
+            profiles = data.setdefault("profiles", {})
+            if validated in profiles:
+                raise ValueError(f"Profile '{validated}' already exists")
+            meta = ProfileMetadata(
+                name=validated,
+                kind=kind,
+                home_dir=actual_home,
+                health="untested",
+                incarnation_id=uuid.uuid4().hex,
             )
-    else:
-        raise ValueError(f"Invalid profile kind: {kind}")
+            profiles[validated] = meta.to_dict()
+            return data
 
-    def _update(data: Any) -> Any:
-        if not isinstance(data, dict):
-            data = {"version": 1, "profiles": {}}
-        profiles = data.setdefault("profiles", {})
-        if validated in profiles:
-            raise ValueError(f"Profile '{validated}' already exists")
-        meta = ProfileMetadata(
-            name=validated,
-            kind=kind,
-            home_dir=actual_home,
-            health="untested",
-        )
-        profiles[validated] = meta.to_dict()
-        return data
-
-    update_json(path, _update, default={"version": 1, "profiles": {}})
-    res = get_profile(validated)
-    assert res is not None
-    return res
+        update_json(path, _update, default={"version": 1, "profiles": {}})
+        res = get_profile(validated)
+        assert res is not None
+        return res
 
 
 def remove_profile(name: str, force: bool = False) -> None:
@@ -340,21 +367,17 @@ def remove_profile(name: str, force: bool = False) -> None:
     validated = validate_profile_name(name)
     path = get_registry_file_path()
 
-    existing = get_profile(validated)
-    if existing is None:
-        raise KeyError(f"Profile '{validated}' does not exist")
+    with acquire_profile_lease(validated, exclusive=True):
+        existing = get_profile(validated)
+        if existing is None:
+            raise KeyError(f"Profile '{validated}' does not exist")
 
-    active_count = get_active_operation_count(validated)
-    if active_count > 0:
-        raise RuntimeError(
-            f"Cannot remove profile '{validated}': active operations are running"
-        )
+        target_incarnation = existing.incarnation_id
 
-    # Stage directory deletion for managed profiles
-    deleting_dir: Path | None = None
-    if existing.kind == "managed":
+        # Stage directory deletion for managed profiles
+        deleting_dir: Path | None = None
         p_dir = get_profile_dir(validated)
-        if p_dir.exists():
+        if existing.kind == "managed" and p_dir.exists():
             stage_name = f".deleting_{validated}_{uuid.uuid4().hex[:8]}"
             deleting_dir = p_dir.parent / stage_name
             try:
@@ -364,22 +387,47 @@ def remove_profile(name: str, force: bool = False) -> None:
                     f"Failed to stage profile directory for removal: {e}"
                 ) from e
 
-    def _update(data: Any) -> Any:
-        if isinstance(data, dict):
+        def _update(data: Any) -> Any:
+            if not isinstance(data, dict):
+                return data
             profiles = data.get("profiles", {})
+            curr = profiles.get(validated)
+            if curr is None:
+                raise KeyError(f"Profile '{validated}' does not exist")
+            if curr.get("incarnation_id") != target_incarnation:
+                raise ValueError(
+                    f"Profile '{validated}' was modified or recreated concurrently "
+                    "(incarnation mismatch)"
+                )
             profiles.pop(validated, None)
-        return data
+            return data
 
-    update_json(path, _update, default={"version": 1, "profiles": {}})
+        try:
+            update_json(path, _update, default={"version": 1, "profiles": {}})
+        except Exception:
+            if deleting_dir and deleting_dir.exists():
+                try:
+                    deleting_dir.rename(p_dir)
+                except Exception:
+                    pass
+            raise
 
-    # Clean up staged managed directory
-    if deleting_dir and deleting_dir.exists():
-        shutil.rmtree(deleting_dir, ignore_errors=True)
+        # Clean up staged managed directory
+        if deleting_dir and deleting_dir.exists():
+            try:
+                shutil.rmtree(deleting_dir)
+            except OSError as e:
+                raise OSError(
+                    f"Failed to remove profile directory {deleting_dir}: {e}"
+                ) from e
 
-    # Clean up runs directory
-    run_dir = get_state_dir() / "runs" / validated
-    if run_dir.exists():
-        shutil.rmtree(run_dir, ignore_errors=True)
+        # Clean up runs directory
+        run_dir = get_state_dir() / "runs" / validated
+        if run_dir.exists():
+            try:
+                shutil.rmtree(run_dir)
+            except OSError:
+                pass
 
 
 def enable_profile(name: str) -> ProfileMetadata:
@@ -508,7 +556,7 @@ def record_profile_selection(
         if validated not in profiles:
             raise KeyError(f"Profile '{validated}' does not exist")
         meta = ProfileMetadata.from_dict(profiles[validated])
-        meta.last_selected_at = now
+        meta.last_selected_at = max(now, meta.last_selected_at or 0.0)
         profiles[validated] = meta.to_dict()
         return data
 
@@ -531,7 +579,16 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
     p_dir = get_profile_dir(name)
     p_home = get_profile_home_dir(name)
     target_gemini = p_home / ".gemini"
-    ensure_private_directory(target_gemini)
+
+    # Reject if destination root or parents are symlinks
+    if p_dir.is_symlink() or os.path.islink(p_dir):
+        raise ValueError(f"Profile directory cannot be a symlink: {p_dir}")
+    if p_home.is_symlink() or os.path.islink(p_home):
+        raise ValueError(f"Profile home directory cannot be a symlink: {p_home}")
+    if target_gemini.is_symlink() or os.path.islink(target_gemini):
+        raise ValueError(
+            f"Target profile .gemini directory cannot be a symlink: {target_gemini}"
+        )
 
     if real_gemini_dir is None:
         env_gemini = os.environ.get("MAGY_REAL_GEMINI")
@@ -542,8 +599,15 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
         else:
             real_gemini_dir = Path.home() / ".gemini"
 
+    if real_gemini_dir.is_symlink() or os.path.islink(real_gemini_dir):
+        raise ValueError(
+            f"Source .gemini directory cannot be a symlink: {real_gemini_dir}"
+        )
+
     if not real_gemini_dir.exists():
         return []
+
+    ensure_private_directory(target_gemini)
 
     try:
         real_gemini_dir.resolve()
@@ -618,7 +682,9 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
         tmp_file = dest.parent / tmp_name
         try:
             content = src.read_bytes()
-            tmp_file.write_bytes(content)
+            fd = os.open(str(tmp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(content)
             ensure_private_file(tmp_file)
             os.replace(tmp_file, dest)
             copied_files.append(dest)
@@ -631,6 +697,8 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
 
     sync_lock = get_lock(p_dir / ".sync")
     with sync_lock:
+        validate_profile_layout(name)
+
         # 1. Sync allowlisted files
         for rel_str in ALLOWLISTED_SETTINGS_FILES:
             rel_path = Path(rel_str)
@@ -755,7 +823,7 @@ def build_profile_env(
         if profile and profile.kind == "external" and profile.home_dir:
             p_home_str = str(Path(profile.home_dir).resolve())
         else:
-            _, p_home = ensure_profile_layout(name)
+            p_home = get_profile_home_dir(name)
             p_home_str = str(p_home.resolve() if p_home.is_absolute() else p_home)
     else:
         p_home_str = home_override
@@ -788,6 +856,54 @@ def build_profile_env(
     return env
 
 
+def _kill_process_tree(proc: subprocess.Popen, grace: float = 1.0) -> None:
+    """Terminate child process and all descendants, escalating to SIGKILL."""
+    if proc.poll() is not None:
+        return
+
+    pid = proc.pid
+    if os.name != "nt":
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+        deadline = time.time() + grace
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return
+            time.sleep(0.05)
+
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+        try:
+            proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    else:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=grace)
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except OSError:
+                pass
+
+
 def run_in_profile(
     name: str,
     args: list[str],
@@ -802,40 +918,45 @@ def run_in_profile(
     update_health: bool = False,
 ) -> Any:
     """Run an Agy command within the profile's isolated environment."""
-    profile = get_profile(name)
-    if profile is None or profile.kind == "managed":
-        validate_profile_layout(name)
-        if sync_settings:
-            sync_profile_settings(name)
+    validated = validate_profile_name(name)
 
-    if executable is None:
-        cfg_res = load_config_result()
-        if cfg_res.error:
-            raise ValueError(f"Invalid configuration: {cfg_res.error}")
-        exe, source = resolve_agy_executable(
-            configured_cmd=cfg_res.config.agy_cmd,
-            configured_resolver=cfg_res.config.agy_resolver,
-            cwd=cwd,
-        )
-        if exe is None:
-            if source:
-                raise FileNotFoundError(f"Agy executable invalid: {source}")
-            raise FileNotFoundError("Agy executable not found")
-        executable = exe
+    with acquire_profile_lease(validated, exclusive=False):
+        profile = get_profile(validated)
+        if profile is not None and not profile.enabled:
+            raise ValueError(f"Profile '{validated}' is disabled")
 
-    if env_overrides:
-        forbidden = set(env_overrides.keys()) & PROTECTED_ENV_VARS
-        if forbidden:
-            raise ValueError(
-                f"Cannot override protected profile environment variables: "
-                f"{', '.join(sorted(forbidden))}"
+        if profile is None or profile.kind == "managed":
+            validate_profile_layout(validated)
+            if sync_settings:
+                sync_profile_settings(validated)
+
+        if executable is None:
+            cfg_res = load_config_result()
+            if cfg_res.error:
+                raise ValueError(f"Invalid configuration: {cfg_res.error}")
+            exe, source = resolve_agy_executable(
+                configured_cmd=cfg_res.config.agy_cmd,
+                configured_resolver=cfg_res.config.agy_resolver,
+                cwd=cwd,
             )
+            if exe is None:
+                if source:
+                    raise FileNotFoundError(f"Agy executable invalid: {source}")
+                raise FileNotFoundError("Agy executable not found")
+            executable = exe
 
-    env = build_profile_env(name)
-    if env_overrides:
-        env.update(env_overrides)
+        if env_overrides:
+            forbidden = set(env_overrides.keys()) & PROTECTED_ENV_VARS
+            if forbidden:
+                raise ValueError(
+                    f"Cannot override protected profile environment variables: "
+                    f"{', '.join(sorted(forbidden))}"
+                )
 
-    with track_active_operation(name) as run_id:
+        env = build_profile_env(validated)
+        if env_overrides:
+            env.update(env_overrides)
+
         caller_log_file: Path | None = None
         for i, arg in enumerate(args):
             if arg in ("--log-file", "-l", "--log"):
@@ -853,10 +974,11 @@ def run_in_profile(
                 else caller_log_file
             )
 
+        run_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
         injected_log_file: Path | None = None
         cmd_args = list(args)
         if (inject_log_file or update_health) and caller_log_file is None:
-            logs_dir = get_state_dir() / "logs" / name
+            logs_dir = get_state_dir() / "logs" / validated
             logs_dir.mkdir(parents=True, exist_ok=True)
             ensure_private_directory(logs_dir)
             injected_log_file = logs_dir / f"{run_id}.log"
@@ -874,57 +996,92 @@ def run_in_profile(
 
         cmd = [str(executable), *cmd_args]
 
-        if capture_output:
-            res = subprocess.run(
-                cmd,
-                env=env,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-            retcode = res.returncode
-            stdout_text = res.stdout
-            stderr_text = res.stderr
-        else:
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                cwd=cwd,
-                stdin=None,
-                stdout=None,
-                stderr=None,
-            )
+        popen_kwargs: dict[str, Any] = {
+            "env": env,
+            "cwd": cwd,
+        }
+        if os.name != "nt":
+            popen_kwargs["process_group"] = 0
 
-            # Signal forwarding
-            def _handler(signum: int, frame: Any) -> None:
+        if capture_output:
+            popen_kwargs["stdout"] = subprocess.PIPE
+            popen_kwargs["stderr"] = subprocess.PIPE
+            popen_kwargs["stdin"] = subprocess.PIPE
+        else:
+            popen_kwargs["stdin"] = None
+            popen_kwargs["stdout"] = None
+            popen_kwargs["stderr"] = None
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+
+        def _forward_signal(signum: int, frame: Any) -> None:
+            if os.name != "nt":
+                try:
+                    os.killpg(proc.pid, signum)
+                except OSError:
+                    pass
+            else:
                 try:
                     proc.send_signal(signum)
                 except OSError:
                     pass
 
-            try:
-                old_sigint = signal.signal(signal.SIGINT, _handler)
-            except (ValueError, AttributeError):
-                old_sigint = None
-            try:
-                old_sigterm = signal.signal(signal.SIGTERM, _handler)
-            except (ValueError, AttributeError):
-                old_sigterm = None
+        old_sigint = None
+        old_sigterm = None
+        try:
+            old_sigint = signal.signal(signal.SIGINT, _forward_signal)
+        except (ValueError, AttributeError):
+            pass
+        try:
+            old_sigterm = signal.signal(signal.SIGTERM, _forward_signal)
+        except (ValueError, AttributeError):
+            pass
 
-            try:
+        timed_out = False
+        try:
+            if capture_output:
+                stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+                stdout_text = (
+                    stdout_bytes.decode("utf-8", errors="replace")
+                    if stdout_bytes
+                    else ""
+                )
+                stderr_text = (
+                    stderr_bytes.decode("utf-8", errors="replace")
+                    if stderr_bytes
+                    else ""
+                )
+                retcode = proc.returncode
+            else:
                 retcode = proc.wait(timeout=timeout)
-            finally:
-                if old_sigint is not None:
-                    signal.signal(signal.SIGINT, old_sigint)
-                if old_sigterm is not None:
-                    signal.signal(signal.SIGTERM, old_sigterm)
+                stdout_text = ""
+                stderr_text = ""
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            _kill_process_tree(proc, grace=1.0)
+            retcode = 124
+            if update_health:
+                cfg = load_config()
+                update_profile_health(
+                    validated,
+                    health="timeout",
+                    cooldown_seconds=cfg.cooldown_timeout,
+                    reason="Command timed out",
+                    is_success=False,
+                )
+            raise exc
+        finally:
+            if old_sigint is not None:
+                signal.signal(signal.SIGINT, old_sigint)
+            if old_sigterm is not None:
+                signal.signal(signal.SIGTERM, old_sigterm)
+            if proc.poll() is None:
+                _kill_process_tree(proc, grace=1.0)
 
-            stdout_text = ""
-            stderr_text = ""
+        if retcode is not None and retcode < 0:
+            retcode = 128 + abs(retcode)
 
-        if update_health:
+        if update_health and not timed_out:
             from magy.agy import classify_run_health, read_bounded_log_tail
 
             log_content = ""
@@ -938,7 +1095,7 @@ def run_in_profile(
                 log_content=log_content,
             )
             update_profile_health(
-                name,
+                validated,
                 classification.health,
                 cooldown_seconds=classification.cooldown_seconds,
                 reason=classification.reason,
@@ -946,5 +1103,10 @@ def run_in_profile(
             )
 
         if capture_output:
-            return res
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=retcode,
+                stdout=stdout_text,
+                stderr=stderr_text,
+            )
         return retcode

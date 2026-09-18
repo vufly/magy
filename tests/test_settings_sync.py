@@ -269,3 +269,50 @@ def test_sync_profile_settings_symlinks_skills_directory(tmp_path: Path):
     assert (target_skills / "skill_a" / "SKILL.md").read_text(
         encoding="utf-8"
     ) == "name: skill_a"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_sync_profile_settings_rejects_symlinked_destination_gemini(tmp_path: Path):
+    """H1: Destination .gemini symlink must be rejected, preventing overwrite."""
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    (real_gemini / "settings.json").write_text('{"safe": true}', encoding="utf-8")
+
+    victim_dir = tmp_path / "external_victim"
+    victim_dir.mkdir()
+    victim_settings = victim_dir / "settings.json"
+    victim_settings.write_text("VICTIM_TOKEN", encoding="utf-8")
+
+    add_profile("dest-sym-p", kind="managed")
+    p_home = get_profile_home_dir("dest-sym-p")
+    target_gemini = p_home / ".gemini"
+
+    # Replace .gemini with symlink to victim directory
+    if target_gemini.exists():
+        import shutil
+
+        shutil.rmtree(target_gemini)
+    target_gemini.symlink_to(victim_dir)
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        sync_profile_settings("dest-sym-p", real_gemini_dir=real_gemini)
+
+    # Assert external victim was NOT touched
+    assert victim_settings.read_text(encoding="utf-8") == "VICTIM_TOKEN"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_sync_profile_settings_rejects_symlinked_source_gemini(tmp_path: Path):
+    """H1: Source .gemini root as a symlink must be rejected."""
+    real_source = tmp_path / "real_source_dir"
+    real_source.mkdir()
+    (real_source / "settings.json").write_text('{"safe": true}', encoding="utf-8")
+
+    symlink_source = tmp_path / "symlink_source_gemini"
+    symlink_source.symlink_to(real_source)
+
+    add_profile("src-root-sym-p", kind="managed")
+    with pytest.raises(
+        ValueError, match="Source .gemini directory cannot be a symlink"
+    ):
+        sync_profile_settings("src-root-sym-p", real_gemini_dir=symlink_source)

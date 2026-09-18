@@ -153,3 +153,92 @@ def test_read_bounded_log_tail(tmp_path: Path):
     decoded = read_bounded_log_tail(binary_file)
     assert "Valid line" in decoded
     assert "End line" in decoded
+
+
+def test_sanitize_reason_compound_and_oauth_credentials():
+    """H5: Redact all compound OAuth tokens, Basic auth, JSON fields, and URLs."""
+    # access_token and refresh_token
+    s1 = sanitize_reason("Error: access_token=super-secret-value and more")
+    assert "super-secret-value" not in s1
+    assert "access_token=[REDACTED]" in s1
+
+    s2 = sanitize_reason("Failed with refresh_token=refresh-secret-123")
+    assert "refresh-secret-123" not in s2
+    assert "refresh_token=[REDACTED]" in s2
+
+    # client_secret, apiKey, x-api-key
+    s3 = sanitize_reason("client_secret=top-secret-client apiKey=key-xyz-1234")
+    assert "top-secret-client" not in s3
+    assert "key-xyz-1234" not in s3
+    assert "client_secret=[REDACTED]" in s3
+    assert "apiKey=[REDACTED]" in s3
+
+    s4 = sanitize_reason("Header x-api-key: secret-x-key rejected")
+    assert "secret-x-key" not in s4
+    assert "x-api-key=[REDACTED]" in s4
+
+    # Basic authorization header
+    s5 = sanitize_reason("Authorization: Basic dXNlcjpwYXNz")
+    assert "dXNlcjpwYXNz" not in s5
+    assert "Authorization: Basic [REDACTED]" in s5
+
+    # Standalone Basic token
+    s6 = sanitize_reason("Invalid credentials Basic dXNlcjpwYXNz")
+    assert "dXNlcjpwYXNz" not in s6
+    assert "Basic [REDACTED]" in s6
+
+    # JSON quoted key/value
+    s7 = sanitize_reason('Payload: {"access_token": "secret-oauth-payload"}')
+    assert "secret-oauth-payload" not in s7
+    assert '"access_token": "[REDACTED]"' in s7
+
+    # URL credentials
+    s8 = sanitize_reason(
+        "Request failed: https://alice:supersecret@example.com/api?foo=bar"
+    )
+    assert "supersecret" not in s8
+    assert "alice" not in s8
+    assert "[REDACTED_USER]:[REDACTED_PASS]@" in s8
+    assert "[REDACTED_QUERY]" in s8
+
+
+def test_parse_retry_seconds_latest_match():
+    """M2: When multiple retry signals exist, pick the latest/winning one."""
+    text = "429 retry in 1 hour\nSubsequent retry: 429 retry in 30s"
+    assert parse_retry_seconds(text) == 30.0
+
+
+def test_classify_run_health_conservative_precedence():
+    """M2: Conservative precedence across sources: auth > quota > rate > timeout."""
+    # Cross-source: newer stdout auth error wins over older/log rate limit
+    c1 = classify_run_health(
+        1,
+        stdout="401 Unauthorized: authentication required",
+        log_content="429 retry in 30s",
+    )
+    assert c1.health == "auth-required"
+
+    # Cross-source: log auth error still wins over stdout rate limit
+    c1_rev = classify_run_health(
+        1,
+        stdout="429 retry in 30s",
+        log_content="401 Unauthorized: authentication required",
+    )
+    assert c1_rev.health == "auth-required"
+
+    # Quota overrides rate limit across sources
+    c2 = classify_run_health(
+        1,
+        stdout="429 retry in 30s",
+        log_content="429 Quota exhausted for model",
+    )
+    assert c2.health == "quota-exhausted"
+
+    # Rate overrides timeout across sources
+    c3 = classify_run_health(
+        1,
+        stdout="429 retry in 30s",
+        log_content="operation timed out after 10s",
+    )
+    assert c3.health == "rate-limited"
+    assert c3.cooldown_seconds == 30.0

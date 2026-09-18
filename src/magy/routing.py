@@ -38,6 +38,7 @@ def get_routing_file_path() -> Path:
 def select_profile(
     explicit_name: str | None = None,
     now: float | None = None,
+    max_retries: int = 3,
 ) -> ProfileMetadata:
     """Select a profile for execution.
 
@@ -64,59 +65,70 @@ def select_profile(
     routing_path = get_routing_file_path()
     lock = get_lock(routing_path, timeout=5.0)
 
-    with lock:
-        profiles = load_profiles()
-        if not profiles:
-            raise NoAvailableProfileError({"all": "No profiles registered."})
+    for attempt in range(max_retries):
+        with lock:
+            profiles = load_profiles()
+            if not profiles:
+                raise NoAvailableProfileError({"all": "No profiles registered."})
 
-        # Deterministic sorting
-        names = sorted(profiles.keys())
-        available_names = [n for n in names if profiles[n].is_available(now)]
+            # Deterministic sorting
+            names = sorted(profiles.keys())
+            available_names = [n for n in names if profiles[n].is_available(now)]
 
-        if not available_names:
-            reasons = {}
-            for n in names:
-                p = profiles[n]
-                if not p.enabled:
-                    reasons[n] = "disabled"
-                elif p.cooldown_until is not None:
-                    remaining = max(0.0, p.cooldown_until - now)
-                    reasons[n] = (
-                        f"{p.health} ({remaining:.1f}s cooldown remaining: "
-                        f"{p.cooldown_reason or 'limit'})"
-                    )
-                else:
-                    reasons[n] = f"{p.health} ({p.cooldown_reason or 'unavailable'})"
-            earliest = min(
-                (
-                    p.cooldown_until
-                    for p in profiles.values()
-                    if p.cooldown_until is not None
-                ),
-                default=None,
+            if not available_names:
+                reasons = {}
+                for n in names:
+                    p = profiles[n]
+                    if not p.enabled:
+                        reasons[n] = "disabled"
+                    elif p.cooldown_until is not None:
+                        remaining = max(0.0, p.cooldown_until - now)
+                        reasons[n] = (
+                            f"{p.health} ({remaining:.1f}s cooldown remaining: "
+                            f"{p.cooldown_reason or 'limit'})"
+                        )
+                    else:
+                        reasons[n] = (
+                            f"{p.health} ({p.cooldown_reason or 'unavailable'})"
+                        )
+                earliest = min(
+                    (
+                        p.cooldown_until
+                        for p in profiles.values()
+                        if p.cooldown_until is not None
+                    ),
+                    default=None,
+                )
+                raise NoAvailableProfileError(reasons, earliest)
+
+            # Read routing cursor
+            routing_state = read_json(
+                routing_path, lock=False, default={"cursor": None}
             )
-            raise NoAvailableProfileError(reasons, earliest)
+            cursor = routing_state.get("cursor")
 
-        # Read routing cursor
-        routing_state = read_json(routing_path, lock=False, default={"cursor": None})
-        cursor = routing_state.get("cursor")
+            if cursor in names:
+                idx = names.index(cursor)
+                ordered_search = names[idx + 1 :] + names[: idx + 1]
+                selected_name = next(
+                    (n for n in ordered_search if n in available_names),
+                    available_names[0],
+                )
+            else:
+                selected_name = available_names[0]
 
-        if cursor in names:
-            idx = names.index(cursor)
-            ordered_search = names[idx + 1 :] + names[: idx + 1]
-            selected_name = next(
-                (n for n in ordered_search if n in available_names),
-                available_names[0],
-            )
-        else:
-            selected_name = available_names[0]
+            # Update cursor under lock
+            routing_state["cursor"] = selected_name
+            routing_state["updated_at"] = now
+            atomic_write_json(routing_path, routing_state, lock=False)
 
-        # Update cursor under lock
-        routing_state["cursor"] = selected_name
-        routing_state["updated_at"] = now
-        atomic_write_json(routing_path, routing_state, lock=False)
+        try:
+            return record_profile_selection(selected_name, now)
+        except (KeyError, ValueError):
+            if attempt == max_retries - 1:
+                raise
 
-    return record_profile_selection(selected_name, now)
+    raise NoAvailableProfileError({"all": "Selection retry limit exceeded."})
 
 
 def get_routing_status() -> dict[str, Any]:

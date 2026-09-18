@@ -375,6 +375,7 @@ RATE_PATTERNS = (
 QUOTA_PATTERNS = (
     "exceeded your current quota",
     "quota exceeded",
+    "quota exhausted",
     "check your plan and billing details",
     "insufficient_quota",
     "out of quota",
@@ -395,10 +396,11 @@ RETRY_PATTERN = re.compile(
 
 
 def parse_retry_seconds(text: str) -> float | None:
-    """Parse provider retry timing in seconds, minutes, or hours."""
-    match = RETRY_PATTERN.search(text)
-    if not match:
+    """Parse provider retry timing in seconds, minutes, or hours (latest match)."""
+    matches = list(RETRY_PATTERN.finditer(text))
+    if not matches:
         return None
+    match = matches[-1]
     try:
         val = float(match.group(1))
     except (ValueError, TypeError):
@@ -410,11 +412,11 @@ def parse_retry_seconds(text: str) -> float | None:
         multiplier = 60.0
     else:
         multiplier = 1.0
-    return max(1.0, val * multiplier)
+    return val * multiplier
 
 
 def sanitize_reason(raw: str) -> str:
-    """Sanitize and redact sensitive tokens, headers, emails, and paths."""
+    """Sanitize and redact sensitive tokens, headers, emails, credentials, and paths."""
     if not raw:
         return "Unknown failure"
 
@@ -427,32 +429,67 @@ def sanitize_reason(raw: str) -> str:
     if not first_line:
         first_line = raw.strip()
 
-    # Redact authorization headers and bearer tokens
+    s = first_line
+
+    # 1. Redact Authorization header with any scheme (Bearer, Basic, Digest, etc.)
+    def _redact_auth_header(m: re.Match) -> str:
+        scheme = m.group(1)
+        if scheme:
+            return f"Authorization: {scheme.strip()} [REDACTED]"
+        return "Authorization: [REDACTED]"
+
     s = re.sub(
-        r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+",
-        r"\1[REDACTED]",
-        first_line,
-    )
-    s = re.sub(
-        r"(?i)\b(authorization:\s*(?:bearer\s+)?)[^\s,;]+",
-        r"\1[REDACTED]",
+        r"(?i)\bauthorization\s*:\s*([A-Za-z0-9_-]+\s+)?[^\s,;]+",
+        _redact_auth_header,
         s,
     )
-    # Redact tokens, keys, secrets, passwords
+    # Standalone Bearer or Basic token
     s = re.sub(
-        r"(?i)\b(token|api_?key|key|secret|password|passwd|auth)[=:\s]+(['\"]?)[^\s'\"]+\2",
+        r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+",
+        lambda m: f"{m.group(1)} [REDACTED]",
+        s,
+    )
+
+    # 2. Redact URL with embedded credentials: http(s)://user:pass@host
+    s = re.sub(
+        r"(https?://)([^:\s/@]+):([^@\s/]+)@",
+        r"\1[REDACTED_USER]:[REDACTED_PASS]@",
+        s,
+    )
+    # Redact URL query parameters
+    s = re.sub(r"(\?[^\s#]*)", r"?[REDACTED_QUERY]", s)
+
+    # 3. Redact common credential keys including compound names
+    cred_names = (
+        r"(?:(?:access[_-]?|refresh[_-]?)?token|"
+        r"client[_-]?secret|"
+        r"(?:x[_-])?api[_-]?key|"
+        r"apiKey|"
+        r"secret(?:[_-]?key)?|"
+        r"pass(?:word|wd)?|"
+        r"auth(?:[_-]?token)?)"
+    )
+    # JSON quoted key/value
+    s = re.sub(
+        rf'(?i)"({cred_names})"\s*:\s*"[^"]*"',
+        r'"\1": "[REDACTED]"',
+        s,
+    )
+    # Key-value pairs
+    s = re.sub(
+        rf'(?i)\b({cred_names})\s*[=:]\s*(["\']?)[^\s,"\']+\2',
         r"\1=[REDACTED]",
         s,
     )
-    # Redact email addresses
+
+    # 4. Redact email addresses
     s = re.sub(
         r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
         "[REDACTED_EMAIL]",
         s,
     )
-    # Redact URL query parameters
-    s = re.sub(r"https?://[^\s?#]+(\?[^\s#]*)", r"[REDACTED_URL]", s)
-    # Redact user home paths
+
+    # 5. Redact user home paths
     s = re.sub(r"/(?:home|Users)/[A-Za-z0-9._-]+", "~", s)
 
     # Normalize whitespace and bound length to 120 chars
@@ -470,8 +507,8 @@ def read_bounded_log_tail(path: Path | str, max_bytes: int = 32768) -> str:
             f.seek(0, io.SEEK_END)
             size = f.tell()
             seek_pos = max(0, size - max_bytes)
-            f.seek(seek_pos)
-            data = f.read(max_bytes)
+            f.seek(seek_pos, io.SEEK_SET)
+            data = f.read()
             return data.decode("utf-8", errors="replace")
     except OSError:
         return ""
@@ -484,7 +521,7 @@ def classify_run_health(
     log_content: str = "",
     config: MagyConfig | None = None,
 ) -> HealthClassification:
-    """Classify the latest relevant health signal from execution results."""
+    """Classify the health outcome of an agy invocation."""
     if exit_code == 0:
         return HealthClassification(health="healthy", is_success=True)
 
@@ -495,72 +532,90 @@ def classify_run_health(
         except Exception:
             config = MagyConfig()
 
+    def _classify_stream(text: str) -> HealthClassification | None:
+        if not text:
+            return None
+        text_lower = text.lower()
+
+        def _latest_pos(patterns: tuple[str, ...]) -> int:
+            latest = -1
+            for p in patterns:
+                if p == "429":
+                    for m in re.finditer(r"\b429\b", text_lower):
+                        if m.start() > latest:
+                            latest = m.start()
+                else:
+                    idx = text_lower.rfind(p.lower())
+                    if idx > latest:
+                        latest = idx
+            return latest
+
+        pos_auth = _latest_pos(AUTH_PATTERNS)
+        pos_quota = _latest_pos(QUOTA_PATTERNS)
+        pos_rate = _latest_pos(RATE_PATTERNS)
+        pos_timeout = _latest_pos(TIMEOUT_PATTERNS)
+
+        best_cat = None
+        max_pos = -1
+        for cat, pos in (
+            ("auth", pos_auth),
+            ("quota", pos_quota),
+            ("rate", pos_rate),
+            ("timeout", pos_timeout),
+        ):
+            if pos > max_pos:
+                max_pos = pos
+                best_cat = cat
+
+        if best_cat == "auth":
+            return HealthClassification(
+                health="auth-required",
+                cooldown_seconds=config.cooldown_auth,
+                reason="Authentication required",
+            )
+        elif best_cat == "quota":
+            return HealthClassification(
+                health="quota-exhausted",
+                cooldown_seconds=config.cooldown_quota,
+                reason="Quota exhausted",
+            )
+        elif best_cat == "rate":
+            parsed_cooldown = parse_retry_seconds(text)
+            cooldown = (
+                parsed_cooldown
+                if parsed_cooldown is not None
+                else config.cooldown_rate_limit
+            )
+            return HealthClassification(
+                health="rate-limited",
+                cooldown_seconds=cooldown,
+                reason=f"Rate limit reached (retry in {cooldown:.0f}s)",
+            )
+        elif best_cat == "timeout":
+            return HealthClassification(
+                health="timeout",
+                cooldown_seconds=config.cooldown_timeout,
+                reason="Request timed out",
+            )
+        return None
+
     bounded_stdout = stdout[-32768:] if len(stdout) > 32768 else stdout
     bounded_stderr = stderr[-32768:] if len(stderr) > 32768 else stderr
     bounded_log = log_content[-32768:] if len(log_content) > 32768 else log_content
-    combined = f"{bounded_stdout}\n{bounded_stderr}\n{bounded_log}".lower()
 
-    def _latest_pos(patterns: tuple[str, ...]) -> int:
-        latest = -1
-        for p in patterns:
-            if p == "429":
-                for m in re.finditer(r"\b429\b", combined):
-                    if m.start() > latest:
-                        latest = m.start()
-            else:
-                idx = combined.rfind(p)
-                if idx > latest:
-                    latest = idx
-        return latest
+    cls_stdout = _classify_stream(bounded_stdout)
+    cls_stderr = _classify_stream(bounded_stderr)
+    cls_log = _classify_stream(bounded_log)
 
-    pos_auth = _latest_pos(AUTH_PATTERNS)
-    pos_rate = _latest_pos(RATE_PATTERNS)
-    pos_quota = _latest_pos(QUOTA_PATTERNS)
-    pos_timeout = _latest_pos(TIMEOUT_PATTERNS)
+    detected = [c for c in (cls_stdout, cls_stderr, cls_log) if c is not None]
 
-    best_cat = None
-    max_pos = -1
-
-    for cat, pos in (
-        ("auth", pos_auth),
-        ("rate", pos_rate),
-        ("quota", pos_quota),
-        ("timeout", pos_timeout),
-    ):
-        if pos > max_pos:
-            max_pos = pos
-            best_cat = cat
-
-    if best_cat == "auth":
-        return HealthClassification(
-            health="auth-required",
-            cooldown_seconds=config.cooldown_auth,
-            reason="Authentication required",
-        )
-    elif best_cat == "rate":
-        parsed_cooldown = parse_retry_seconds(combined)
-        cooldown = (
-            parsed_cooldown
-            if parsed_cooldown is not None
-            else config.cooldown_rate_limit
-        )
-        return HealthClassification(
-            health="rate-limited",
-            cooldown_seconds=cooldown,
-            reason=f"Rate limit reached (retry in {cooldown:.0f}s)",
-        )
-    elif best_cat == "quota":
-        return HealthClassification(
-            health="quota-exhausted",
-            cooldown_seconds=config.cooldown_quota,
-            reason="Quota exhausted",
-        )
-    elif best_cat == "timeout":
-        return HealthClassification(
-            health="timeout",
-            cooldown_seconds=config.cooldown_timeout,
-            reason="Request timed out",
-        )
+    if detected:
+        # Conservative precedence across sources: auth > quota > rate > timeout
+        categories = ("auth-required", "quota-exhausted", "rate-limited", "timeout")
+        for cat_name in categories:
+            for c in detected:
+                if c.health == cat_name:
+                    return c
 
     # Unknown failure
     raw_err = bounded_stderr or bounded_stdout or bounded_log
