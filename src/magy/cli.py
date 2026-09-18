@@ -26,9 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         version="%(prog)s 0.1.0",
     )
 
-    subparsers = parser.add_subparsers(
-        dest="subcommand", help="Available subcommands"
-    )
+    subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -58,9 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="profile_action", help="Profile actions"
     )
 
-    add_p = profile_subparsers.add_parser(
-        "add", help="Add a new profile."
-    )
+    add_p = profile_subparsers.add_parser("add", help="Add a new profile.")
     add_p.add_argument("name", help="Profile name.")
     add_p.add_argument(
         "--current",
@@ -95,9 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments forwarded to agy.",
     )
 
-    list_p = profile_subparsers.add_parser(
-        "list", help="List registered profiles."
-    )
+    list_p = profile_subparsers.add_parser("list", help="List registered profiles.")
     list_p.add_argument(
         "--json",
         action="store_true",
@@ -114,14 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output profile in JSON format.",
     )
 
-    enable_p = profile_subparsers.add_parser(
-        "enable", help="Enable a profile."
-    )
+    enable_p = profile_subparsers.add_parser("enable", help="Enable a profile.")
     enable_p.add_argument("name", help="Profile name.")
 
-    disable_p = profile_subparsers.add_parser(
-        "disable", help="Disable a profile."
-    )
+    disable_p = profile_subparsers.add_parser("disable", help="Disable a profile.")
     disable_p.add_argument("name", help="Profile name.")
 
     reset_p = profile_subparsers.add_parser(
@@ -129,9 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reset_p.add_argument("name", help="Profile name.")
 
-    remove_p = profile_subparsers.add_parser(
-        "remove", help="Remove a profile."
-    )
+    remove_p = profile_subparsers.add_parser("remove", help="Remove a profile.")
     remove_p.add_argument("name", help="Profile name.")
     remove_p.add_argument(
         "--force",
@@ -220,6 +208,7 @@ def run_status(args: argparse.Namespace) -> int:
     print(f"Total Profiles:    {status['total_profiles']}")
     print(f"Enabled Profiles:  {status['enabled_profiles']}")
     print(f"Healthy Profiles:  {status['healthy_profiles']}")
+    print(f"Untested Profiles: {status['untested_profiles']}")
     print(f"In Cooldown:       {status['cooldown_profiles']}")
     print(f"Current Cursor:    {status['cursor'] or 'none'}")
     return 0
@@ -388,7 +377,7 @@ def handle_profile_command(
             remove_profile(args.name, force=force)
             print(f"Removed profile '{args.name}'")
             return 0
-        except (KeyError, ValueError) as e:
+        except (KeyError, ValueError, RuntimeError, OSError) as e:
             print(f"magy: error: {e}", file=sys.stderr)
             return 1
 
@@ -403,16 +392,34 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
 
-    # Fast check: help or version flags
     if not argv:
         parser.print_help()
         return 0
 
-    if argv[0] in ("-h", "--help"):
+    try:
+        from importlib.metadata import version as pkg_version
+
+        v_str = pkg_version("magy")
+    except Exception:
+        v_str = "0.1.0"
+
+    if "--" in argv:
+        dash_idx = argv.index("--")
+        pre_args = argv[:dash_idx]
+        post_args = argv[dash_idx + 1 :]
+    else:
+        pre_args = list(argv)
+        post_args = None
+
+    if "-h" in pre_args or "--help" in pre_args:
         parser.print_help()
         return 0
 
-    # If first token is one of the known subcommands
+    if "-V" in pre_args or "--version" in pre_args:
+        print(f"magy {v_str}")
+        return 0
+
+    # Subcommands
     if argv[0] in ("doctor", "status", "profile"):
         args, remaining = parser.parse_known_args(argv)
         if args.subcommand == "doctor":
@@ -426,38 +433,47 @@ def main(argv: list[str] | None = None) -> int:
         elif args.subcommand == "profile":
             return handle_profile_command(args, remaining, parser)
 
-    # Check if a subcommand appears later (misplaced subcommand)
-    for sub in ("doctor", "status", "profile"):
-        if sub in argv:
-            args, remaining = parser.parse_known_args(argv)
-            if remaining:
-                parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+    # Check for misplaced subcommands when no '--' was given
+    if post_args is None:
+        for sub in ("doctor", "status", "profile"):
+            if sub in argv:
+                parser.error(
+                    f"misplaced subcommand '{sub}': subcommands must precede "
+                    f"options or use 'magy {sub}'"
+                )
 
-    # Otherwise, this is Agy passthrough mode!
-    # Syntax:
-    #   magy [--profile NAME] [--] <agy arguments...>
+    # Agy passthrough mode
     target_profile: str | None = None
     agy_args: list[str] = []
 
-    # Parse options before '--' delimiter
-    if "--" in argv:
-        dash_idx = argv.index("--")
-        pre_args = argv[:dash_idx]
-        post_args = argv[dash_idx + 1 :]
-
-        # Parse pre_args for --profile
+    if post_args is not None:
         pre_parser = argparse.ArgumentParser(prog="magy", add_help=False)
         pre_parser.add_argument("--profile", dest="profile")
-        pre_args_parsed, pre_remaining = pre_parser.parse_known_args(pre_args)
+        try:
+            pre_args_parsed, pre_remaining = pre_parser.parse_known_args(pre_args)
+        except SystemExit:
+            parser.error("argument --profile: expected one argument")
         if pre_remaining:
             parser.error(f"Unrecognized arguments: {' '.join(pre_remaining)}")
         target_profile = pre_args_parsed.profile
+        if target_profile == "":
+            parser.error("argument --profile: cannot be empty")
         agy_args = list(post_args)
     else:
-        # No '--' delimiter: check if starts with --profile
-        if len(argv) >= 2 and argv[0] == "--profile":
+        if argv[0] == "--profile":
+            if len(argv) < 2:
+                parser.error("argument --profile: expected one argument")
+            if argv[1] == "--":
+                parser.error("argument --profile: expected one argument")
             target_profile = argv[1]
+            if not target_profile:
+                parser.error("argument --profile: cannot be empty")
             agy_args = argv[2:]
+        elif argv[0].startswith("--profile="):
+            target_profile = argv[0].split("=", 1)[1]
+            if not target_profile:
+                parser.error("argument --profile: cannot be empty")
+            agy_args = argv[1:]
         else:
             agy_args = list(argv)
 

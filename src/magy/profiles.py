@@ -8,31 +8,41 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
+
 from magy.agy import resolve_agy_executable
-from magy.config import get_data_dir, load_config_result
+from magy.config import get_data_dir, get_state_dir, load_config_result
 from magy.storage import (
     atomic_write_json,
     ensure_private_directory,
     ensure_private_file,
+    get_lock,
     read_json,
     safe_expand_path,
     update_json,
     validate_profile_name,
 )
 
-PROTECTED_ENV_VARS = frozenset({
-    "HOME",
-    "USERPROFILE",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "MAGY_REAL_HOME",
-    "AGY_CLI_DISABLE_AUTO_UPDATE",
-    "MAGY_PROFILE",
-})
+PROTECTED_ENV_VARS = frozenset(
+    {
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "MAGY_REAL_HOME",
+        "AGY_CLI_DISABLE_AUTO_UPDATE",
+        "MAGY_PROFILE",
+    }
+)
 
 ALLOWLISTED_SETTINGS_FILES = (
     "AGENTS.md",
@@ -77,16 +87,17 @@ class ProfileMetadata:
     last_selected_at: float | None = None
     last_success_at: float | None = None
     last_failure_at: float | None = None
-    health: str = "healthy"
+    health: str = "untested"
     cooldown_until: float | None = None
     cooldown_reason: str | None = None
+    pre_disable_health: str | None = None
 
     def is_available(self, now: float | None = None) -> bool:
         if not self.enabled:
             return False
         if self.health == "disabled":
             return False
-        if self.health == "healthy":
+        if self.health in ("healthy", "untested"):
             return True
         if self.cooldown_until is not None:
             current = time.time() if now is None else now
@@ -112,9 +123,10 @@ class ProfileMetadata:
             last_selected_at=data.get("last_selected_at"),
             last_success_at=data.get("last_success_at"),
             last_failure_at=data.get("last_failure_at"),
-            health=data.get("health", "healthy"),
+            health=data.get("health", "untested"),
             cooldown_until=data.get("cooldown_until"),
             cooldown_reason=data.get("cooldown_reason"),
+            pre_disable_health=data.get("pre_disable_health"),
         )
 
 
@@ -127,9 +139,8 @@ def _check_no_symlink_and_contained(
     if path.exists():
         resolved = path.resolve()
         parent_resolved = expected_parent.resolve()
-        is_contained = (
-            resolved == parent_resolved
-            or resolved.is_relative_to(parent_resolved)
+        is_contained = resolved == parent_resolved or resolved.is_relative_to(
+            parent_resolved
         )
         if not is_contained:
             raise ValueError(
@@ -208,24 +219,73 @@ def get_profile(name: str) -> ProfileMetadata | None:
     return profiles.get(validated)
 
 
-def _ensure_profile_registered(name: str) -> None:
-    """Ensure that a managed profile is recorded in registry."""
-    path = get_registry_file_path()
+@contextmanager
+def track_active_operation(name: str):
+    """Track an active operation on a profile using a non-blocking lock."""
+    validated = validate_profile_name(name)
+    run_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    run_dir = get_state_dir() / "runs" / validated
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(run_dir)
+    lock_file = run_dir / f"{run_id}.lock"
 
-    def _update(data: Any) -> Any:
-        if not isinstance(data, dict):
-            data = {"version": 1, "profiles": {}}
-        profiles = data.setdefault("profiles", {})
-        if name not in profiles:
-            p = ProfileMetadata(
-                name=name,
-                kind="managed",
-                home_dir=str(get_profile_home_dir(name)),
-            )
-            profiles[name] = p.to_dict()
-        return data
+    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            os.close(fd)
+            raise RuntimeError(
+                f"Could not acquire run lock for '{validated}': {e}"
+            ) from e
 
-    update_json(path, _update, default={"version": 1, "profiles": {}})
+    try:
+        yield run_id
+    finally:
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            lock_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def get_active_operation_count(name: str) -> int:
+    """Return count of currently active operations for a profile."""
+    validated = validate_profile_name(name)
+    run_dir = get_state_dir() / "runs" / validated
+    if not run_dir.is_dir():
+        return 0
+    active = 0
+    for lock_file in list(run_dir.glob("*.lock")):
+        try:
+            fd = os.open(str(lock_file), os.O_RDWR)
+        except OSError:
+            continue
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # Lock acquired: previous process exited without cleaning up stale lock
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+                try:
+                    lock_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            except (BlockingIOError, OSError):
+                # Lock is currently held by an active operation
+                os.close(fd)
+                active += 1
+        else:
+            os.close(fd)
+    return active
 
 
 def add_profile(
@@ -256,15 +316,13 @@ def add_profile(
         if not isinstance(data, dict):
             data = {"version": 1, "profiles": {}}
         profiles = data.setdefault("profiles", {})
-        if validated in profiles and profiles[validated].get("kind") != kind:
-            existing_kind = profiles[validated].get("kind")
-            raise ValueError(
-                f"Profile '{validated}' already exists with kind '{existing_kind}'"
-            )
+        if validated in profiles:
+            raise ValueError(f"Profile '{validated}' already exists")
         meta = ProfileMetadata(
             name=validated,
             kind=kind,
             home_dir=actual_home,
+            health="untested",
         )
         profiles[validated] = meta.to_dict()
         return data
@@ -276,32 +334,58 @@ def add_profile(
 
 
 def remove_profile(name: str, force: bool = False) -> None:
-    """Remove a profile from registry and delete managed storage."""
+    """Remove a profile from registry and delete managed storage.
+
+    Rejects removal if active operations are running on the profile.
+    The force parameter bypasses CLI confirmation, NOT active-operation safety.
+    """
     validated = validate_profile_name(name)
     path = get_registry_file_path()
-    p_to_delete: ProfileMetadata | None = None
+
+    existing = get_profile(validated)
+    if existing is None:
+        raise KeyError(f"Profile '{validated}' does not exist")
+
+    active_count = get_active_operation_count(validated)
+    if active_count > 0:
+        raise RuntimeError(
+            f"Cannot remove profile '{validated}': active operations are running"
+        )
+
+    # Stage directory deletion for managed profiles
+    deleting_dir: Path | None = None
+    if existing.kind == "managed":
+        p_dir = get_profile_dir(validated)
+        if p_dir.exists():
+            stage_name = f".deleting_{validated}_{uuid.uuid4().hex[:8]}"
+            deleting_dir = p_dir.parent / stage_name
+            try:
+                p_dir.rename(deleting_dir)
+            except OSError as e:
+                raise OSError(
+                    f"Failed to stage profile directory for removal: {e}"
+                ) from e
 
     def _update(data: Any) -> Any:
-        nonlocal p_to_delete
-        if not isinstance(data, dict):
-            raise KeyError(f"Profile '{validated}' does not exist")
-        profiles = data.get("profiles", {})
-        if validated not in profiles:
-            raise KeyError(f"Profile '{validated}' does not exist")
-        p_to_delete = ProfileMetadata.from_dict(profiles.pop(validated))
+        if isinstance(data, dict):
+            profiles = data.get("profiles", {})
+            profiles.pop(validated, None)
         return data
 
     update_json(path, _update, default={"version": 1, "profiles": {}})
 
-    # If managed, remove filesystem directory tree
-    if p_to_delete and p_to_delete.kind == "managed":
-        p_dir = get_profile_dir(validated)
-        if p_dir.exists():
-            shutil.rmtree(p_dir)
+    # Clean up staged managed directory
+    if deleting_dir and deleting_dir.exists():
+        shutil.rmtree(deleting_dir, ignore_errors=True)
+
+    # Clean up runs directory
+    run_dir = get_state_dir() / "runs" / validated
+    if run_dir.exists():
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def enable_profile(name: str) -> ProfileMetadata:
-    """Enable a profile."""
+    """Enable profile, restoring health without clearing active cooldown."""
     validated = validate_profile_name(name)
     path = get_registry_file_path()
 
@@ -312,7 +396,8 @@ def enable_profile(name: str) -> ProfileMetadata:
         meta = ProfileMetadata.from_dict(profiles[validated])
         meta.enabled = True
         if meta.health == "disabled":
-            meta.health = "healthy"
+            meta.health = meta.pre_disable_health or "untested"
+        meta.pre_disable_health = None
         profiles[validated] = meta.to_dict()
         return data
 
@@ -323,7 +408,7 @@ def enable_profile(name: str) -> ProfileMetadata:
 
 
 def disable_profile(name: str) -> ProfileMetadata:
-    """Disable a profile."""
+    """Disable a profile, preserving its health and cooldown state."""
     validated = validate_profile_name(name)
     path = get_registry_file_path()
 
@@ -333,6 +418,8 @@ def disable_profile(name: str) -> ProfileMetadata:
             raise KeyError(f"Profile '{validated}' does not exist")
         meta = ProfileMetadata.from_dict(profiles[validated])
         meta.enabled = False
+        if meta.health != "disabled":
+            meta.pre_disable_health = meta.health
         meta.health = "disabled"
         profiles[validated] = meta.to_dict()
         return data
@@ -356,6 +443,7 @@ def reset_profile_health(name: str) -> ProfileMetadata:
         meta.health = "healthy"
         meta.cooldown_until = None
         meta.cooldown_reason = None
+        meta.pre_disable_health = None
         profiles[validated] = meta.to_dict()
         return data
 
@@ -371,22 +459,23 @@ def update_profile_health(
     cooldown_seconds: float | None = None,
     reason: str | None = None,
     is_success: bool = False,
-) -> ProfileMetadata:
-    """Update profile health and cooldown state in registry."""
+) -> ProfileMetadata | None:
+    """Update profile health and cooldown state in registry.
+
+    Fails silently (returning None) if profile does not exist in registry,
+    preventing resurrection of removed profiles.
+    """
     validated = validate_profile_name(name)
     path = get_registry_file_path()
 
-    def _update(data: Any) -> Any:
-        profiles = data.setdefault("profiles", {})
-        if validated not in profiles:
-            meta = ProfileMetadata(
-                name=validated,
-                kind="managed",
-                home_dir=str(get_profile_home_dir(validated)),
-            )
-        else:
-            meta = ProfileMetadata.from_dict(profiles[validated])
+    from magy.agy import sanitize_reason
 
+    def _update(data: Any) -> Any:
+        profiles = data.get("profiles", {})
+        if validated not in profiles:
+            return data
+
+        meta = ProfileMetadata.from_dict(profiles[validated])
         now = time.time()
         meta.health = health
         if is_success:
@@ -399,8 +488,29 @@ def update_profile_health(
                 meta.cooldown_until = now + cooldown_seconds
             else:
                 meta.cooldown_until = None
-            meta.cooldown_reason = reason[:256] if reason else None
+            meta.cooldown_reason = sanitize_reason(reason) if reason else None
 
+        profiles[validated] = meta.to_dict()
+        return data
+
+    update_json(path, _update, default={"version": 1, "profiles": {}})
+    return get_profile(validated)
+
+
+def record_profile_selection(
+    name: str, selected_at: float | None = None
+) -> ProfileMetadata:
+    """Record that a profile was selected for execution."""
+    validated = validate_profile_name(name)
+    path = get_registry_file_path()
+    now = time.time() if selected_at is None else selected_at
+
+    def _update(data: Any) -> Any:
+        profiles = data.setdefault("profiles", {})
+        if validated not in profiles:
+            raise KeyError(f"Profile '{validated}' does not exist")
+        meta = ProfileMetadata.from_dict(profiles[validated])
+        meta.last_selected_at = now
         profiles[validated] = meta.to_dict()
         return data
 
@@ -410,9 +520,7 @@ def update_profile_health(
     return res
 
 
-def sync_profile_settings(
-    name: str, real_gemini_dir: Path | None = None
-) -> list[Path]:
+def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> list[Path]:
     """Synchronize safe non-auth configuration from real .gemini tree to profile.
 
     Copies only allowlisted settings, rejecting any path escaping .gemini.
@@ -422,6 +530,7 @@ def sync_profile_settings(
     if profile and profile.kind == "external":
         return []
 
+    p_dir = get_profile_dir(name)
     p_home = get_profile_home_dir(name)
     target_gemini = p_home / ".gemini"
     ensure_private_directory(target_gemini)
@@ -439,88 +548,125 @@ def sync_profile_settings(
         return []
 
     try:
-        real_gemini_resolved = real_gemini_dir.resolve()
+        real_gemini_dir.resolve()
+        target_gemini_resolved = target_gemini.resolve()
     except OSError:
         return []
 
     copied_files: list[Path] = []
 
-    def _is_denied(filename: str) -> bool:
-        low = filename.lower()
+    def _is_component_denied(part: str) -> bool:
+        low = part.lower()
         return any(fnmatch.fnmatch(low, pat) for pat in DENIED_FILE_PATTERNS)
 
-    def _safe_copy_file(src: Path, dest: Path) -> None:
-        if _is_denied(src.name):
+    def _is_rel_path_denied(rel_path: Path) -> bool:
+        return any(_is_component_denied(part) for part in rel_path.parts)
+
+    def _safe_copy_file(src: Path, rel_path: Path) -> None:
+        if _is_rel_path_denied(rel_path):
             return
-        # Ensure symlinks do not escape real_gemini_resolved
+
+        # Do not follow source symlinks
         if src.is_symlink() or os.path.islink(src):
+            return
+
+        dest = target_gemini / rel_path
+
+        # Reject destination if it or any intermediate directory is a symlink
+        curr = target_gemini
+        for part in rel_path.parts[:-1]:
+            curr = curr / part
+            if curr.is_symlink() or os.path.islink(curr):
+                return
+            if curr.exists():
+                try:
+                    curr_resolved = curr.resolve()
+                    if not (
+                        curr_resolved == target_gemini_resolved
+                        or curr_resolved.is_relative_to(target_gemini_resolved)
+                    ):
+                        return
+                except OSError:
+                    return
+            else:
+                try:
+                    parent_res = curr.parent.resolve()
+                    if not (
+                        parent_res == target_gemini_resolved
+                        or parent_res.is_relative_to(target_gemini_resolved)
+                    ):
+                        return
+                except OSError:
+                    return
+                ensure_private_directory(curr)
+
+        # Reject if destination file itself is a symlink
+        if dest.is_symlink() or os.path.islink(dest):
+            return
+        if dest.exists():
             try:
-                resolved_src = src.resolve()
+                dest_res = dest.resolve()
+                if not (
+                    dest_res == target_gemini_resolved
+                    or dest_res.is_relative_to(target_gemini_resolved)
+                ):
+                    return
             except OSError:
-                return
-            if not resolved_src.is_relative_to(real_gemini_resolved):
-                return
-            if _is_denied(resolved_src.name):
                 return
 
         ensure_private_directory(dest.parent)
+
+        tmp_name = f".tmp_sync_{uuid.uuid4().hex}"
+        tmp_file = dest.parent / tmp_name
         try:
-            dest_resolved = dest.resolve()
-            target_gemini_resolved = target_gemini.resolve()
-            if not (
-                dest_resolved == target_gemini_resolved
-                or dest_resolved.is_relative_to(target_gemini_resolved)
-            ):
-                raise ValueError(
-                    f"Destination path '{dest}' escapes target directory"
-                )
+            content = src.read_bytes()
+            tmp_file.write_bytes(content)
+            ensure_private_file(tmp_file)
+            os.replace(tmp_file, dest)
+            copied_files.append(dest)
         except OSError:
-            pass
-
-        content = src.read_bytes()
-        dest.write_bytes(content)
-        ensure_private_file(dest)
-        copied_files.append(dest)
-
-    # 1. Sync allowlisted files
-    for rel_str in ALLOWLISTED_SETTINGS_FILES:
-        src_path = real_gemini_dir / rel_str
-        if src_path.exists() and src_path.is_file():
-            dest_path = target_gemini / rel_str
-            _safe_copy_file(src_path, dest_path)
-
-    # 2. Sync allowlisted directories
-    for rel_dir_str in ALLOWLISTED_SETTINGS_DIRS:
-        src_dir = real_gemini_dir / rel_dir_str
-        if src_dir.exists() and src_dir.is_dir():
-            if src_dir.is_symlink() or os.path.islink(src_dir):
+            if tmp_file.exists():
                 try:
-                    resolved_dir = src_dir.resolve()
+                    tmp_file.unlink()
                 except OSError:
-                    continue
-                if not resolved_dir.is_relative_to(real_gemini_resolved):
-                    continue
+                    pass
 
-            for root, dirs, files in os.walk(src_dir):
-                # Filter out symlinked dirs escaping real_gemini
-                valid_dirs = []
-                for d in dirs:
-                    d_p = Path(root) / d
-                    if d_p.is_symlink() or os.path.islink(d_p):
-                        try:
-                            if d_p.resolve().is_relative_to(real_gemini_resolved):
-                                valid_dirs.append(d)
-                        except OSError:
-                            pass
-                    else:
+    sync_lock = get_lock(p_dir / ".sync")
+    with sync_lock:
+        # 1. Sync allowlisted files
+        for rel_str in ALLOWLISTED_SETTINGS_FILES:
+            rel_path = Path(rel_str)
+            src_path = real_gemini_dir / rel_path
+            if src_path.exists() and src_path.is_file():
+                _safe_copy_file(src_path, rel_path)
+
+        # 2. Sync allowlisted directories
+        for rel_dir_str in ALLOWLISTED_SETTINGS_DIRS:
+            rel_dir = Path(rel_dir_str)
+            src_dir = real_gemini_dir / rel_dir
+            if (
+                src_dir.exists()
+                and src_dir.is_dir()
+                and not (src_dir.is_symlink() or os.path.islink(src_dir))
+            ):
+                for root, dirs, files in os.walk(src_dir):
+                    valid_dirs = []
+                    for d in dirs:
+                        d_path = Path(root) / d
+                        if d_path.is_symlink() or os.path.islink(d_path):
+                            continue
+                        rel_d = d_path.relative_to(real_gemini_dir)
+                        if _is_rel_path_denied(rel_d):
+                            continue
                         valid_dirs.append(d)
-                dirs[:] = valid_dirs
+                    dirs[:] = valid_dirs
 
-                for f in files:
-                    f_p = Path(root) / f
-                    rel = f_p.relative_to(real_gemini_dir)
-                    dest_f = target_gemini / rel
-                    _safe_copy_file(f_p, dest_f)
+                    for f in files:
+                        f_path = Path(root) / f
+                        if f_path.is_symlink() or os.path.islink(f_path):
+                            continue
+                        rel_f = f_path.relative_to(real_gemini_dir)
+                        _safe_copy_file(f_path, rel_f)
 
     return copied_files
 
@@ -553,7 +699,6 @@ def ensure_profile_layout(name: str) -> tuple[Path, Path]:
     _check_no_symlink_and_contained(gemini_dir, p_home, "Profile .gemini directory")
 
     validate_profile_layout(name)
-    _ensure_profile_registered(name)
     return p_dir, p_home
 
 
@@ -618,7 +763,7 @@ def run_in_profile(
     env_overrides: dict[str, str] | None = None,
     capture_output: bool = False,
     timeout: float | None = None,
-    sync_settings: bool = False,
+    sync_settings: bool = True,
     inject_log_file: bool = False,
     update_health: bool = False,
 ) -> Any:
@@ -652,136 +797,148 @@ def run_in_profile(
     if env_overrides:
         env.update(env_overrides)
 
-    injected_log_file: Path | None = None
-    cmd_args = list(args)
-    if inject_log_file:
-        has_log_arg = any(
-            arg in ("--log-file", "-l") or arg.startswith("--log-file=")
-            for arg in args
-        )
-        if not has_log_arg:
-            injected_log_file = get_profile_dir(name) / "last_run.log"
+    with track_active_operation(name) as run_id:
+        caller_log_file: Path | None = None
+        for i, arg in enumerate(args):
+            if arg in ("--log-file", "-l", "--log"):
+                if i + 1 < len(args):
+                    caller_log_file = Path(args[i + 1])
+            elif arg.startswith(("--log-file=", "--log=")):
+                caller_log_file = Path(arg.split("=", 1)[1])
+
+        injected_log_file: Path | None = None
+        cmd_args = list(args)
+        if inject_log_file and caller_log_file is None:
+            logs_dir = get_state_dir() / "logs" / name
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(logs_dir)
+            injected_log_file = logs_dir / f"{run_id}.log"
             cmd_args = [*args, "--log-file", str(injected_log_file)]
 
-    cmd = [str(executable), *cmd_args]
+        cmd = [str(executable), *cmd_args]
 
-    if capture_output:
-        res = subprocess.run(
-            cmd,
-            env=env,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        retcode = res.returncode
-        stdout_text = res.stdout
-        stderr_text = res.stderr
-    else:
-        # Stream stderr while capturing bounded recent content for health inspection
-        captured_stderr = bytearray()
-        stdin_target = None
-        try:
-            if sys.stdin and hasattr(sys.stdin, "fileno"):
-                sys.stdin.fileno()
-                stdin_target = sys.stdin
-        except (io.UnsupportedOperation, AttributeError, OSError):
+        if capture_output:
+            res = subprocess.run(
+                cmd,
+                env=env,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            retcode = res.returncode
+            stdout_text = res.stdout
+            stderr_text = res.stderr
+        else:
+            # Stream stdout and stderr with bounded rolling tails for health
+            captured_stdout = bytearray()
+            captured_stderr = bytearray()
             stdin_target = None
-
-        stdout_target = None
-        try:
-            if sys.stdout and hasattr(sys.stdout, "fileno"):
-                sys.stdout.fileno()
-                stdout_target = sys.stdout
-        except (io.UnsupportedOperation, AttributeError, OSError):
-            stdout_target = None
-
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            cwd=cwd,
-            stdin=stdin_target,
-            stdout=stdout_target,
-            stderr=subprocess.PIPE,
-        )
-
-        def _forward_stderr(pipe: Any) -> None:
             try:
-                while True:
-                    chunk = pipe.read(4096)
-                    if not chunk:
-                        break
-                    try:
-                        if hasattr(sys.stderr, "buffer"):
-                            sys.stderr.buffer.write(chunk)
-                            sys.stderr.buffer.flush()
-                        else:
-                            sys.stderr.write(chunk.decode(errors="replace"))
-                            sys.stderr.flush()
-                    except Exception:
-                        pass
-                    if len(captured_stderr) < 65536:
-                        captured_stderr.extend(chunk[: 65536 - len(captured_stderr)])
+                if sys.stdin and hasattr(sys.stdin, "fileno"):
+                    sys.stdin.fileno()
+                    stdin_target = sys.stdin
+            except (io.UnsupportedOperation, AttributeError, OSError):
+                stdin_target = None
+
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                cwd=cwd,
+                stdin=stdin_target,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            def _forward_pipe(
+                pipe: Any, out_stream: Any, captured_buf: bytearray
+            ) -> None:
+                try:
+                    while True:
+                        chunk = pipe.read(4096)
+                        if not chunk:
+                            break
+                        try:
+                            if hasattr(out_stream, "buffer"):
+                                out_stream.buffer.write(chunk)
+                                out_stream.buffer.flush()
+                            else:
+                                text_c = chunk.decode("utf-8", errors="replace")
+                                out_stream.write(text_c)
+                                out_stream.flush()
+                        except Exception:
+                            pass
+                        captured_buf.extend(chunk)
+                        if len(captured_buf) > 65536:
+                            del captured_buf[:-65536]
+                finally:
+                    pipe.close()
+
+            t_out = threading.Thread(
+                target=_forward_pipe,
+                args=(proc.stdout, sys.stdout, captured_stdout),
+                daemon=True,
+            )
+            t_err = threading.Thread(
+                target=_forward_pipe,
+                args=(proc.stderr, sys.stderr, captured_stderr),
+                daemon=True,
+            )
+            t_out.start()
+            t_err.start()
+
+            # Signal forwarding
+            def _handler(signum: int, frame: Any) -> None:
+                try:
+                    proc.send_signal(signum)
+                except OSError:
+                    pass
+
+            try:
+                old_sigint = signal.signal(signal.SIGINT, _handler)
+            except (ValueError, AttributeError):
+                old_sigint = None
+            try:
+                old_sigterm = signal.signal(signal.SIGTERM, _handler)
+            except (ValueError, AttributeError):
+                old_sigterm = None
+
+            try:
+                retcode = proc.wait(timeout=timeout)
             finally:
-                pipe.close()
+                if old_sigint is not None:
+                    signal.signal(signal.SIGINT, old_sigint)
+                if old_sigterm is not None:
+                    signal.signal(signal.SIGTERM, old_sigterm)
+                t_out.join(timeout=1.0)
+                t_err.join(timeout=1.0)
 
-        t = threading.Thread(target=_forward_stderr, args=(proc.stderr,))
-        t.daemon = True
-        t.start()
+            stdout_text = captured_stdout.decode("utf-8", errors="replace")
+            stderr_text = captured_stderr.decode("utf-8", errors="replace")
 
-        # Signal forwarding
-        def _handler(signum: int, frame: Any) -> None:
-            try:
-                proc.send_signal(signum)
-            except OSError:
-                pass
+        if update_health:
+            from magy.agy import classify_run_health, read_bounded_log_tail
 
-        try:
-            old_sigint = signal.signal(signal.SIGINT, _handler)
-        except (ValueError, AttributeError):
-            old_sigint = None
-        try:
-            old_sigterm = signal.signal(signal.SIGTERM, _handler)
-        except (ValueError, AttributeError):
-            old_sigterm = None
+            effective_log = caller_log_file or injected_log_file
+            log_content = ""
+            if effective_log and effective_log.is_file():
+                log_content = read_bounded_log_tail(effective_log, max_bytes=32768)
 
-        try:
-            retcode = proc.wait(timeout=timeout)
-        finally:
-            if old_sigint is not None:
-                signal.signal(signal.SIGINT, old_sigint)
-            if old_sigterm is not None:
-                signal.signal(signal.SIGTERM, old_sigterm)
-            t.join(timeout=1.0)
+            classification = classify_run_health(
+                retcode,
+                stdout=stdout_text,
+                stderr=stderr_text,
+                log_content=log_content,
+            )
+            update_profile_health(
+                name,
+                classification.health,
+                cooldown_seconds=classification.cooldown_seconds,
+                reason=classification.reason,
+                is_success=classification.is_success,
+            )
 
-        stdout_text = ""
-        stderr_text = captured_stderr.decode("utf-8", errors="replace")
-
-    if update_health:
-        from magy.agy import classify_run_health
-
-        log_content = ""
-        if injected_log_file and injected_log_file.exists():
-            try:
-                log_content = injected_log_file.read_text(encoding="utf-8")[-32768:]
-            except OSError:
-                pass
-
-        classification = classify_run_health(
-            retcode,
-            stdout=stdout_text,
-            stderr=stderr_text,
-            log_content=log_content,
-        )
-        update_profile_health(
-            name,
-            classification.health,
-            cooldown_seconds=classification.cooldown_seconds,
-            reason=classification.reason,
-            is_success=classification.is_success,
-        )
-
-    if capture_output:
-        return res
-    return retcode
+        if capture_output:
+            return res
+        return retcode

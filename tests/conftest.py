@@ -60,23 +60,16 @@ def fake_agy(tmp_path: Path, monkeypatch) -> Generator[FakeAgy, None, None]:
     if os.name == "nt":
         script_path = bin_dir / "agy.bat"
         script_content = (
-            f"@echo off\r\n"
-            f'"{sys.executable}" -m magy.testing.fake_agy %*\r\n'
+            f'@echo off\r\n"{sys.executable}" -m magy.testing.fake_agy %*\r\n'
         )
         script_path.write_text(script_content, encoding="utf-8")
     else:
         script_path = bin_dir / "agy"
         script_content = (
-            f"#!/bin/sh\n"
-            f'exec "{sys.executable}" -m magy.testing.fake_agy "$@"\n'
+            f'#!/bin/sh\nexec "{sys.executable}" -m magy.testing.fake_agy "$@"\n'
         )
         script_path.write_text(script_content, encoding="utf-8")
-        mode = (
-            script_path.stat().st_mode
-            | stat.S_IXUSR
-            | stat.S_IXGRP
-            | stat.S_IXOTH
-        )
+        mode = script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
         script_path.chmod(mode)
 
     # Ensure fake_agy can be found on PATH or via MAGY_AGY_CMD if desired

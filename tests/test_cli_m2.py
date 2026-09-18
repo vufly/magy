@@ -37,7 +37,7 @@ def test_cli_profile_show(capfd):
     data = json.loads(capfd.readouterr().out)
     assert data["name"] == "show-p"
     assert data["kind"] == "managed"
-    assert data["health"] == "healthy"
+    assert data["health"] == "untested"
 
 
 def test_cli_profile_enable_disable(capfd):
@@ -139,4 +139,46 @@ def test_cli_passthrough_explicit_profile(fake_agy, monkeypatch, capsys):
 def test_cli_passthrough_rejects_unknown_option_before_double_dash():
     with pytest.raises(SystemExit) as exc_info:
         main(["--bogus-opt", "--", "models"])
+    assert exc_info.value.code == 2
+
+
+def test_cli_version_flag(capfd):
+    ret1 = main(["--version"])
+    assert ret1 == 0
+    assert "magy 0.1.0" in capfd.readouterr().out
+
+    ret2 = main(["-V"])
+    assert ret2 == 0
+    assert "magy 0.1.0" in capfd.readouterr().out
+
+
+def test_cli_missing_profile_arg_rejected():
+    with pytest.raises(SystemExit) as exc_info1:
+        main(["--profile"])
+    assert exc_info1.value.code == 2
+
+    with pytest.raises(SystemExit) as exc_info2:
+        main(["--profile", "--", "models"])
+    assert exc_info2.value.code == 2
+
+    with pytest.raises(SystemExit) as exc_info3:
+        main(["--profile="])
+    assert exc_info3.value.code == 2
+
+
+def test_cli_profile_equals_form(fake_agy, monkeypatch, capsys):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    main(["profile", "add", "equals-p"])
+    capsys.readouterr()
+
+    ret = main(["--profile=equals-p", "--", "models"])
+    assert ret == 0
+    assert "[magy] using profile: equals-p" in capsys.readouterr().err
+
+
+def test_cli_misplaced_subcommand_rejected():
+    main(["profile", "add", "misplaced-p"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--profile", "misplaced-p", "status"])
     assert exc_info.value.code == 2

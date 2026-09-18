@@ -167,8 +167,7 @@ def test_doctor_config_path_resolution_error(fake_agy, monkeypatch, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["healthy"] is False
     assert any(
-        "denied access to config path" in m
-        for m in data["missing_prerequisites"]
+        "denied access to config path" in m for m in data["missing_prerequisites"]
     )
 
 
@@ -264,9 +263,7 @@ def test_doctor_unknown_user_configured_agy_cmd(fake_agy, monkeypatch, capsys):
 
     cfg_path = get_config_file_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(
-        '{"agy_cmd": "~__magy_missing_user__/agy"}', encoding="utf-8"
-    )
+    cfg_path.write_text('{"agy_cmd": "~__magy_missing_user__/agy"}', encoding="utf-8")
 
     ret = main(["doctor"])
     assert ret == 1
@@ -301,8 +298,5 @@ def test_doctor_root_permission_enforcement_failure(fake_agy, monkeypatch, capsy
     data = json.loads(capsys.readouterr().out)
     assert data["healthy"] is False
     assert any(
-        "Permission denied accessing" in m
-        for m in data["missing_prerequisites"]
+        "Permission denied accessing" in m for m in data["missing_prerequisites"]
     )
-
-

@@ -59,6 +59,11 @@ def get_state_dir(create: bool = True) -> Path:
 @dataclass
 class MagyConfig:
     agy_cmd: str | None = None
+    cooldown_rate_limit: float = 60.0
+    cooldown_quota: float = 3600.0
+    cooldown_timeout: float = 30.0
+    cooldown_unknown: float = 15.0
+    cooldown_auth: float = 86400.0
 
     def __post_init__(self) -> None:
         if self.agy_cmd is not None:
@@ -70,6 +75,17 @@ class MagyConfig:
             if not self.agy_cmd.strip():
                 raise ValueError("agy_cmd cannot be an empty string")
 
+        for attr in (
+            "cooldown_rate_limit",
+            "cooldown_quota",
+            "cooldown_timeout",
+            "cooldown_unknown",
+            "cooldown_auth",
+        ):
+            val = getattr(self, attr)
+            if not isinstance(val, (int, float)) or val <= 0:
+                raise ValueError(f"{attr} must be a positive number, got {val}")
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -79,7 +95,17 @@ class MagyConfig:
             raise TypeError(
                 f"Configuration must be a JSON object, got {type(data).__name__}"
             )
-        return cls(agy_cmd=data.get("agy_cmd"))
+        try:
+            return cls(
+                agy_cmd=data.get("agy_cmd"),
+                cooldown_rate_limit=float(data.get("cooldown_rate_limit", 60.0)),
+                cooldown_quota=float(data.get("cooldown_quota", 3600.0)),
+                cooldown_timeout=float(data.get("cooldown_timeout", 30.0)),
+                cooldown_unknown=float(data.get("cooldown_unknown", 15.0)),
+                cooldown_auth=float(data.get("cooldown_auth", 86400.0)),
+            )
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid cooldown setting in configuration: {e}") from e
 
 
 @dataclass
@@ -107,10 +133,7 @@ def load_config_result() -> ConfigLoadResult:
         target = f" in config file {path}" if path else ""
         return ConfigLoadResult(
             config=MagyConfig(),
-            error=(
-                f"Malformed JSON{target}: {e.msg} "
-                f"(line {e.lineno}, col {e.colno})"
-            ),
+            error=(f"Malformed JSON{target}: {e.msg} (line {e.lineno}, col {e.colno})"),
         )
     except (TypeError, ValueError) as e:
         target = f" in {path}" if path else ""

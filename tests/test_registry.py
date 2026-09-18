@@ -22,7 +22,7 @@ def test_add_and_get_managed_profile():
     assert meta.name == "worker-1"
     assert meta.kind == "managed"
     assert meta.enabled is True
-    assert meta.health == "healthy"
+    assert meta.health == "untested"
     assert meta.cooldown_until is None
 
     p = get_profile("worker-1")
@@ -40,6 +40,7 @@ def test_add_external_profile(tmp_path: Path):
     assert meta.name == "external-p"
     assert meta.kind == "external"
     assert meta.resolved_home() == ext_home.resolve()
+    assert meta.health == "untested"
     assert meta.is_available() is True
 
 
@@ -60,7 +61,7 @@ def test_enable_disable_profile():
 
     meta2 = enable_profile("toggle-p")
     assert meta2.enabled is True
-    assert meta2.health == "healthy"
+    assert meta2.health == "untested"
     assert meta2.is_available() is True
 
 
@@ -145,3 +146,63 @@ def test_profile_metadata_serialization():
     assert rebuilt.name == meta.name
     assert rebuilt.cooldown_until == 150.0
     assert rebuilt.cooldown_reason == "429 Too Many Requests"
+
+
+def test_add_profile_duplicate_fails():
+    add_profile("dupe-p", kind="managed")
+    with pytest.raises(ValueError, match="already exists"):
+        add_profile("dupe-p", kind="managed")
+
+
+def test_disable_enable_preserves_cooldown():
+    add_profile("cd-preserve", kind="managed")
+    now = time.time()
+    update_profile_health(
+        "cd-preserve",
+        health="rate-limited",
+        cooldown_seconds=60.0,
+        reason="Rate limit",
+        is_success=False,
+    )
+    p_before = get_profile("cd-preserve")
+    assert p_before.health == "rate-limited"
+    assert p_before.is_available(now) is False
+
+    # Disable profile
+    disable_profile("cd-preserve")
+    p_dis = get_profile("cd-preserve")
+    assert p_dis.enabled is False
+    assert p_dis.health == "disabled"
+    assert p_dis.cooldown_until is not None
+
+    # Re-enable profile: should NOT clear cooldown or bypass it!
+    enable_profile("cd-preserve")
+    p_en = get_profile("cd-preserve")
+    assert p_en.enabled is True
+    assert p_en.health == "rate-limited"
+    assert p_en.is_available(now) is False  # Cooldown still active!
+    assert p_en.is_available(now + 70.0) is True  # Available after expiry
+
+
+def test_remove_profile_active_operation_fails():
+    from magy.profiles import track_active_operation
+
+    add_profile("active-rm", kind="managed")
+    with track_active_operation("active-rm"):
+        with pytest.raises(RuntimeError, match="active operations are running"):
+            remove_profile("active-rm", force=True)
+
+    # After active operation finishes, removal succeeds
+    remove_profile("active-rm", force=True)
+    assert get_profile("active-rm") is None
+
+
+def test_update_health_does_not_resurrect_removed_profile():
+    add_profile("no-resurrect", kind="managed")
+    remove_profile("no-resurrect", force=True)
+    assert get_profile("no-resurrect") is None
+
+    # Child exits after removal and attempts to update health
+    res = update_profile_health("no-resurrect", "healthy", is_success=True)
+    assert res is None
+    assert get_profile("no-resurrect") is None

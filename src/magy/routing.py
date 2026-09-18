@@ -8,6 +8,7 @@ from magy.profiles import (
     ProfileMetadata,
     get_profile,
     load_profiles,
+    record_profile_selection,
 )
 from magy.storage import atomic_write_json, get_lock, read_json
 
@@ -58,7 +59,7 @@ def select_profile(
                 f"state ({profile.cooldown_reason or 'cooldown'})\n"
             )
             sys.stderr.flush()
-        return profile
+        return record_profile_selection(explicit_name, now)
 
     routing_path = get_routing_file_path()
     lock = get_lock(routing_path, timeout=5.0)
@@ -97,9 +98,7 @@ def select_profile(
             raise NoAvailableProfileError(reasons, earliest)
 
         # Read routing cursor
-        routing_state = read_json(
-            routing_path, lock=False, default={"cursor": None}
-        )
+        routing_state = read_json(routing_path, lock=False, default={"cursor": None})
         cursor = routing_state.get("cursor")
 
         if cursor in names:
@@ -117,21 +116,20 @@ def select_profile(
         routing_state["updated_at"] = now
         atomic_write_json(routing_path, routing_state, lock=False)
 
-    return profiles[selected_name]
+    return record_profile_selection(selected_name, now)
 
 
 def get_routing_status() -> dict[str, Any]:
     """Get current routing status including cursor and profiles overview."""
     profiles = load_profiles()
     routing_path = get_routing_file_path()
-    routing_state = read_json(
-        routing_path, lock=True, default={"cursor": None}
-    )
+    routing_state = read_json(routing_path, lock=True, default={"cursor": None})
 
     now = time.time()
     total = len(profiles)
     enabled = sum(1 for p in profiles.values() if p.enabled)
     healthy = sum(1 for p in profiles.values() if p.enabled and p.health == "healthy")
+    untested = sum(1 for p in profiles.values() if p.enabled and p.health == "untested")
     cooldown = sum(
         1
         for p in profiles.values()
@@ -143,5 +141,6 @@ def get_routing_status() -> dict[str, Any]:
         "total_profiles": total,
         "enabled_profiles": enabled,
         "healthy_profiles": healthy,
+        "untested_profiles": untested,
         "cooldown_profiles": cooldown,
     }

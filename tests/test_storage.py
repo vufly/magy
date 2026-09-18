@@ -238,6 +238,7 @@ def test_atomic_write_concurrent_writers(tmp_path: Path):
 
     def worker(worker_id: int):
         for i in range(iterations):
+
             def modifier(data):
                 data["updates"] += 1
                 data[f"worker_{worker_id}"] = i

@@ -122,3 +122,106 @@ def test_sync_profile_settings_skips_external_profiles(tmp_path: Path):
 
     copied = sync_profile_settings("ext-sync-p", real_gemini_dir=real_gemini)
     assert len(copied) == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_sync_rejects_destination_symlink_to_token(tmp_path: Path):
+    """H1: Destination symlink pointing to oauth token must NOT overwrite token."""
+    add_profile("dest-symlink-p", kind="managed")
+    target_gemini = get_profile_home_dir("dest-symlink-p") / ".gemini"
+
+    # Profile has an existing OAuth token
+    cli_dir = target_gemini / "antigravity-cli"
+    cli_dir.mkdir(parents=True, exist_ok=True)
+    token_file = cli_dir / "antigravity-oauth-token"
+    token_file.write_text("CRITICAL_OAUTH_TOKEN", encoding="utf-8")
+
+    # Attacker places a symlink at target settings.json pointing to token_file
+    target_settings = target_gemini / "settings.json"
+    target_settings.symlink_to(token_file)
+
+    # Real gemini has a settings.json
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    (real_gemini / "settings.json").write_text('{"theme": "light"}', encoding="utf-8")
+
+    # Perform settings sync
+    sync_profile_settings("dest-symlink-p", real_gemini_dir=real_gemini)
+
+    # Token must NOT be overwritten!
+    assert token_file.read_text(encoding="utf-8") == "CRITICAL_OAUTH_TOKEN"
+
+
+def test_sync_prunes_denied_nested_directory_components(tmp_path: Path):
+    """H1: Sensitive directory components anywhere in relative path must be pruned."""
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+
+    # Denied directory component inside allowlisted directory 'commands'
+    oauth_dir = real_gemini / "commands" / "oauth"
+    oauth_dir.mkdir(parents=True)
+    (oauth_dir / "payload.bin").write_bytes(b"SENSITIVE_OAUTH_PAYLOAD")
+
+    # Denied directory component inside allowlisted directory 'config'
+    creds_dir = real_gemini / "config" / "credentials"
+    creds_dir.mkdir(parents=True)
+    (creds_dir / "data.json").write_text('{"key": "secret"}', encoding="utf-8")
+
+    # Safe file in commands
+    safe_file = real_gemini / "commands" / "safe_script.sh"
+    safe_file.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    add_profile("nested-denied-p", kind="managed")
+    sync_profile_settings("nested-denied-p", real_gemini_dir=real_gemini)
+
+    target_gemini = get_profile_home_dir("nested-denied-p") / ".gemini"
+    assert (target_gemini / "commands" / "safe_script.sh").exists()
+    assert not (target_gemini / "commands" / "oauth").exists()
+    assert not (target_gemini / "commands" / "oauth" / "payload.bin").exists()
+    assert not (target_gemini / "config" / "credentials").exists()
+    assert not (target_gemini / "config" / "credentials" / "data.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_sync_skips_in_root_source_symlinks(tmp_path: Path):
+    """H1: In-root source symlinks must not be followed."""
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+
+    safe_target = real_gemini / "original_file.txt"
+    safe_target.write_text("original", encoding="utf-8")
+
+    cmds = real_gemini / "commands"
+    cmds.mkdir()
+    symlink_file = cmds / "linked_cmd.txt"
+    symlink_file.symlink_to(safe_target)
+
+    add_profile("src-symlink-p", kind="managed")
+    sync_profile_settings("src-symlink-p", real_gemini_dir=real_gemini)
+
+    target_gemini = get_profile_home_dir("src-symlink-p") / ".gemini"
+    assert not (target_gemini / "commands" / "linked_cmd.txt").exists()
+
+
+def test_concurrent_sync_under_lock(tmp_path: Path):
+    """M2: Concurrent settings synchronization is serialized and safe."""
+    import concurrent.futures
+
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    (real_gemini / "settings.json").write_text('{"count": 0}', encoding="utf-8")
+
+    add_profile("concurrent-sync-p", kind="managed")
+
+    def _sync():
+        return sync_profile_settings("concurrent-sync-p", real_gemini_dir=real_gemini)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(_sync) for _ in range(8)]
+        results = [f.result() for f in futures]
+
+    assert len(results) == 8
+    target_settings = (
+        get_profile_home_dir("concurrent-sync-p") / ".gemini" / "settings.json"
+    )
+    assert target_settings.read_text(encoding="utf-8") == '{"count": 0}'

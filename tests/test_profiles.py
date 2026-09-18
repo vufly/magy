@@ -85,6 +85,7 @@ def test_ensure_profile_layout_rejects_symlink_gemini_dir(tmp_path: Path):
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
 def test_ensure_profile_layout_rejects_symlink_profiles_root(tmp_path: Path):
     from magy.config import get_data_dir
+
     data_dir = get_data_dir()
     external_dir = tmp_path / "external_profiles_root"
     external_dir.mkdir()
@@ -93,6 +94,7 @@ def test_ensure_profile_layout_rejects_symlink_profiles_root(tmp_path: Path):
     if profiles_link.exists():
         if profiles_link.is_dir() and not profiles_link.is_symlink():
             import shutil
+
             shutil.rmtree(profiles_link)
         else:
             profiles_link.unlink()
@@ -247,9 +249,7 @@ def test_run_in_profile_respects_config_agy_cmd(fake_agy, monkeypatch):
 
     cfg_path = get_config_file_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(
-        f'{{"agy_cmd": "{fake_agy.executable}"}}', encoding="utf-8"
-    )
+    cfg_path.write_text(f'{{"agy_cmd": "{fake_agy.executable}"}}', encoding="utf-8")
 
     ret = run_in_profile("cfg-profile", ["models"])
     assert ret == 0

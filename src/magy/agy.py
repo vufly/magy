@@ -1,5 +1,7 @@
+import io
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from magy.config import (
+    MagyConfig,
     get_config_dir,
     get_data_dir,
     get_state_dir,
@@ -138,9 +141,7 @@ def collect_diagnostics() -> AgyDiagnostics:
         if agy_ver is None:
             missing.append(f"Unable to execute '{exe} --version'")
 
-    def _safe_get_root(
-        name: str, getter_fn: Any
-    ) -> tuple[Path | None, str | None]:
+    def _safe_get_root(name: str, getter_fn: Any) -> tuple[Path | None, str | None]:
         target_path: Path | None = None
         try:
             target_path = getter_fn(create=False)
@@ -197,105 +198,225 @@ class HealthClassification:
     is_success: bool = False
 
 
+AUTH_PATTERNS = (
+    "please sign in",
+    "authentication required",
+    "auth login",
+    "credentials expired",
+    "unauthenticated",
+    "token expired",
+    "invalid credentials",
+    "authentication failed",
+)
+
+RATE_PATTERNS = (
+    "429",
+    "rate limit reached",
+    "resource exhausted: rate limit",
+    "resource_exhausted",
+    "too many requests",
+    "rate_limit_exceeded",
+    "rate limit exceeded",
+    "rate_limited",
+)
+
+QUOTA_PATTERNS = (
+    "exceeded your current quota",
+    "quota exceeded",
+    "check your plan and billing details",
+    "insufficient_quota",
+    "out of quota",
+)
+
+TIMEOUT_PATTERNS = (
+    "request timed out",
+    "deadline exceeded",
+    "timeout after",
+    "timed out",
+)
+
+RETRY_PATTERN = re.compile(
+    r"(?:retry|try again)\s+(?:in|after)\s+([0-9]+(?:\.[0-9]+)?)\s*"
+    r"(h(?:ou)?rs?|m(?:in(?:ute)?)?s?|s(?:ec(?:ond)?)?s?)?\b",
+    re.IGNORECASE,
+)
+
+
+def parse_retry_seconds(text: str) -> float | None:
+    """Parse provider retry timing in seconds, minutes, or hours."""
+    match = RETRY_PATTERN.search(text)
+    if not match:
+        return None
+    try:
+        val = float(match.group(1))
+    except (ValueError, TypeError):
+        return None
+    unit = (match.group(2) or "s").lower()
+    if unit.startswith("h"):
+        multiplier = 3600.0
+    elif unit.startswith("m"):
+        multiplier = 60.0
+    else:
+        multiplier = 1.0
+    return max(1.0, val * multiplier)
+
+
+def sanitize_reason(raw: str) -> str:
+    """Sanitize and redact sensitive tokens, headers, emails, and paths."""
+    if not raw:
+        return "Unknown failure"
+
+    first_line = ""
+    for line in raw.splitlines():
+        line_clean = line.strip()
+        if line_clean and not line_clean.startswith("Traceback"):
+            first_line = line_clean
+            break
+    if not first_line:
+        first_line = raw.strip()
+
+    # Redact authorization headers and bearer tokens
+    s = re.sub(
+        r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+",
+        r"\1[REDACTED]",
+        first_line,
+    )
+    s = re.sub(
+        r"(?i)\b(authorization:\s*(?:bearer\s+)?)[^\s,;]+",
+        r"\1[REDACTED]",
+        s,
+    )
+    # Redact tokens, keys, secrets, passwords
+    s = re.sub(
+        r"(?i)\b(token|api_?key|key|secret|password|passwd|auth)[=:\s]+(['\"]?)[^\s'\"]+\2",
+        r"\1=[REDACTED]",
+        s,
+    )
+    # Redact email addresses
+    s = re.sub(
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        "[REDACTED_EMAIL]",
+        s,
+    )
+    # Redact URL query parameters
+    s = re.sub(r"https?://[^\s?#]+(\?[^\s#]*)", r"[REDACTED_URL]", s)
+    # Redact user home paths
+    s = re.sub(r"/(?:home|Users)/[A-Za-z0-9._-]+", "~", s)
+
+    # Normalize whitespace and bound length to 120 chars
+    s = " ".join(s.split())
+    return s[:120].strip() or "Unknown failure"
+
+
+def read_bounded_log_tail(path: Path | str, max_bytes: int = 32768) -> str:
+    """Read a bounded tail from a log file without loading the entire file."""
+    p = Path(path)
+    if not p.is_file():
+        return ""
+    try:
+        with p.open("rb") as f:
+            f.seek(0, io.SEEK_END)
+            size = f.tell()
+            seek_pos = max(0, size - max_bytes)
+            f.seek(seek_pos)
+            data = f.read(max_bytes)
+            return data.decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def classify_run_health(
     exit_code: int,
     stdout: str = "",
     stderr: str = "",
     log_content: str = "",
+    config: MagyConfig | None = None,
 ) -> HealthClassification:
     """Classify the latest relevant health signal from execution results."""
     if exit_code == 0:
         return HealthClassification(health="healthy", is_success=True)
 
-    # Take bounded recent stderr and log content (last 32KB each)
+    if config is None:
+        try:
+            cfg_res = load_config_result()
+            config = cfg_res.config if not cfg_res.error else MagyConfig()
+        except Exception:
+            config = MagyConfig()
+
+    bounded_stdout = stdout[-32768:] if len(stdout) > 32768 else stdout
     bounded_stderr = stderr[-32768:] if len(stderr) > 32768 else stderr
     bounded_log = log_content[-32768:] if len(log_content) > 32768 else log_content
-    combined = f"{bounded_stderr}\n{bounded_log}".lower()
+    combined = f"{bounded_stdout}\n{bounded_stderr}\n{bounded_log}".lower()
 
-    # 1. Auth required
-    auth_patterns = (
-        "please sign in",
-        "authentication required",
-        "auth login",
-        "credentials expired",
-        "unauthenticated",
-        "token expired",
-        "invalid credentials",
-        "authentication failed",
-    )
-    if any(p in combined for p in auth_patterns):
+    def _latest_pos(patterns: tuple[str, ...]) -> int:
+        latest = -1
+        for p in patterns:
+            if p == "429":
+                for m in re.finditer(r"\b429\b", combined):
+                    if m.start() > latest:
+                        latest = m.start()
+            else:
+                idx = combined.rfind(p)
+                if idx > latest:
+                    latest = idx
+        return latest
+
+    pos_auth = _latest_pos(AUTH_PATTERNS)
+    pos_rate = _latest_pos(RATE_PATTERNS)
+    pos_quota = _latest_pos(QUOTA_PATTERNS)
+    pos_timeout = _latest_pos(TIMEOUT_PATTERNS)
+
+    best_cat = None
+    max_pos = -1
+
+    for cat, pos in (
+        ("auth", pos_auth),
+        ("rate", pos_rate),
+        ("quota", pos_quota),
+        ("timeout", pos_timeout),
+    ):
+        if pos > max_pos:
+            max_pos = pos
+            best_cat = cat
+
+    if best_cat == "auth":
         return HealthClassification(
             health="auth-required",
-            cooldown_seconds=86400.0,
+            cooldown_seconds=config.cooldown_auth,
             reason="Authentication required",
         )
-
-    # 2. Rate limit
-    rate_patterns = (
-        "429",
-        "rate limit reached",
-        "resource exhausted: rate limit",
-        "resource_exhausted",
-        "too many requests",
-        "rate_limit_exceeded",
-    )
-    if any(p in combined for p in rate_patterns):
-        import re
-
-        pattern = (
-            r"(?:retry|try again) (?:in|after) "
-            r"([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec|seconds)?"
+    elif best_cat == "rate":
+        parsed_cooldown = parse_retry_seconds(combined)
+        cooldown = (
+            parsed_cooldown
+            if parsed_cooldown is not None
+            else config.cooldown_rate_limit
         )
-        retry_match = re.search(pattern, combined)
-        if retry_match:
-            cooldown = float(retry_match.group(1))
-        else:
-            cooldown = 60.0
         return HealthClassification(
             health="rate-limited",
             cooldown_seconds=cooldown,
             reason=f"Rate limit reached (retry in {cooldown:.0f}s)",
         )
-
-    # 3. Quota exhausted
-    quota_patterns = (
-        "exceeded your current quota",
-        "quota exceeded",
-        "check your plan and billing details",
-        "insufficient_quota",
-        "out of quota",
-    )
-    if any(p in combined for p in quota_patterns):
+    elif best_cat == "quota":
         return HealthClassification(
             health="quota-exhausted",
-            cooldown_seconds=3600.0,
+            cooldown_seconds=config.cooldown_quota,
             reason="Quota exhausted",
         )
-
-    # 4. Timeout
-    timeout_patterns = (
-        "request timed out",
-        "deadline exceeded",
-        "timeout after",
-        "timed out",
-    )
-    if any(p in combined for p in timeout_patterns):
+    elif best_cat == "timeout":
         return HealthClassification(
             health="timeout",
-            cooldown_seconds=30.0,
+            cooldown_seconds=config.cooldown_timeout,
             reason="Request timed out",
         )
 
-    # 5. Unknown failure
-    first_line = ""
-    for line in stderr.splitlines():
-        line_clean = line.strip()
-        if line_clean and not line_clean.startswith("Traceback"):
-            first_line = line_clean[:120]
-            break
-    reason = first_line or f"Command failed with exit code {exit_code}"
+    # Unknown failure
+    raw_err = bounded_stderr or bounded_stdout or bounded_log
+    sanitized = sanitize_reason(raw_err)
+    if not sanitized or sanitized == "Unknown failure":
+        sanitized = f"Command failed with exit code {exit_code}"
     return HealthClassification(
         health="unknown-failure",
-        cooldown_seconds=15.0,
-        reason=reason,
+        cooldown_seconds=config.cooldown_unknown,
+        reason=sanitized,
     )

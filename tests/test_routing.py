@@ -127,5 +127,64 @@ def test_routing_status():
     status = get_routing_status()
     assert status["total_profiles"] == 2
     assert status["enabled_profiles"] == 2
-    assert status["healthy_profiles"] == 2
+    assert status["untested_profiles"] == 2
+    assert status["healthy_profiles"] == 0
     assert status["cursor"] == "stat-a"
+
+    # When one is verified healthy
+    update_profile_health("stat-a", "healthy", is_success=True)
+    status2 = get_routing_status()
+    assert status2["untested_profiles"] == 1
+    assert status2["healthy_profiles"] == 1
+
+
+def test_selection_persists_last_selected_at():
+    from magy.profiles import get_profile
+
+    add_profile("sel-p1", kind="managed")
+    add_profile("sel-p2", kind="managed")
+
+    p1_initial = get_profile("sel-p1")
+    assert p1_initial.last_selected_at is None
+
+    t0 = 1000.0
+    sel = select_profile(now=t0)
+    assert sel.name == "sel-p1"
+    assert sel.last_selected_at == t0
+
+    # Verify persisted in registry
+    p1_after = get_profile("sel-p1")
+    assert p1_after.last_selected_at == t0
+
+    # Explicit selection also persists timestamp
+    t1 = 2000.0
+    sel_exp = select_profile(explicit_name="sel-p2", now=t1)
+    assert sel_exp.name == "sel-p2"
+    assert sel_exp.last_selected_at == t1
+    p2_after = get_profile("sel-p2")
+    assert p2_after.last_selected_at == t1
+
+
+def test_spawned_process_round_robin_distribution():
+    import subprocess
+    import sys
+
+    add_profile("proc-1", kind="managed")
+    add_profile("proc-2", kind="managed")
+    add_profile("proc-3", kind="managed")
+
+    results = []
+    # Spawn 6 separate Python CLI processes running select_profile
+    cmd = [
+        sys.executable,
+        "-c",
+        "from magy.routing import select_profile; print(select_profile().name)",
+    ]
+    for _ in range(6):
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        results.append(res.stdout.strip())
+
+    assert results == ["proc-1", "proc-2", "proc-3", "proc-1", "proc-2", "proc-3"]
+
+    status = get_routing_status()
+    assert status["cursor"] == "proc-3"

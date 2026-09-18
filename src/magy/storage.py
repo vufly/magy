@@ -33,9 +33,7 @@ def validate_identifier(name: str, identifier_type: str = "identifier") -> str:
             f"{identifier_type} '{name}' is too long (maximum 64 characters)"
         )
     if "/" in name or "\\" in name:
-        raise ValueError(
-            f"{identifier_type} '{name}' cannot contain path separators"
-        )
+        raise ValueError(f"{identifier_type} '{name}' cannot contain path separators")
     if name in (".", ".."):
         raise ValueError(f"{identifier_type} '{name}' is not allowed")
     if not IDENTIFIER_PATTERN.fullmatch(name):
@@ -44,9 +42,7 @@ def validate_identifier(name: str, identifier_type: str = "identifier") -> str:
             "(only alphanumeric, dash, and underscore allowed)"
         )
     if name.upper() in WINDOWS_RESERVED_NAMES:
-        raise ValueError(
-            f"{identifier_type} '{name}' matches a reserved platform name"
-        )
+        raise ValueError(f"{identifier_type} '{name}' matches a reserved platform name")
     return name
 
 
@@ -128,9 +124,7 @@ def atomic_write_json(
             while offset < total_len:
                 written = os.write(fd, encoded[offset:])
                 if written == 0:
-                    raise OSError(
-                        "Failed to write to temporary file: 0 bytes written"
-                    )
+                    raise OSError("Failed to write to temporary file: 0 bytes written")
                 offset += written
             os.fsync(fd)
         finally:
