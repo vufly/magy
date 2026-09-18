@@ -43,6 +43,7 @@ PROTECTED_ENV_VARS = frozenset(
 
 ALLOWLISTED_SETTINGS_FILES = (
     "AGENTS.md",
+    "GEMINI.md",
     "settings.json",
     "trustedFolders.json",
     "antigravity-cli/settings.json",
@@ -650,6 +651,8 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
                     valid_dirs = []
                     for d in dirs:
                         d_path = Path(root) / d
+                        if d_path == real_gemini_dir / "config" / "skills":
+                            continue
                         if d_path.is_symlink() or os.path.islink(d_path):
                             continue
                         rel_d = d_path.relative_to(real_gemini_dir)
@@ -664,6 +667,30 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
                             continue
                         rel_f = f_path.relative_to(real_gemini_dir)
                         _safe_copy_file(f_path, rel_f)
+
+        # 3. Symlink skills directory if available in real .gemini
+        skills_src: Path | None = None
+        if (real_gemini_dir / "config" / "skills").exists():
+            skills_src = real_gemini_dir / "config" / "skills"
+        elif (real_gemini_dir / "skills").exists():
+            skills_src = real_gemini_dir / "skills"
+
+        if skills_src is not None:
+            skills_dest = target_gemini / "config" / "skills"
+            ensure_private_directory(skills_dest.parent)
+            if skills_dest.is_symlink() or os.path.islink(skills_dest):
+                try:
+                    current_target = os.readlink(str(skills_dest))
+                    if current_target != str(skills_src):
+                        skills_dest.unlink()
+                        skills_dest.symlink_to(skills_src)
+                except OSError:
+                    pass
+            elif not skills_dest.exists():
+                try:
+                    skills_dest.symlink_to(skills_src)
+                except OSError:
+                    pass
 
     return copied_files
 

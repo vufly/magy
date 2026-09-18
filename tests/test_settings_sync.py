@@ -225,3 +225,47 @@ def test_concurrent_sync_under_lock(tmp_path: Path):
         get_profile_home_dir("concurrent-sync-p") / ".gemini" / "settings.json"
     )
     assert target_settings.read_text(encoding="utf-8") == '{"count": 0}'
+
+
+def test_sync_profile_settings_copies_gemini_md(tmp_path: Path):
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    (real_gemini / "GEMINI.md").write_text("# Gemini Rules", encoding="utf-8")
+
+    add_profile("gemini-md-p", kind="managed")
+    copied = sync_profile_settings("gemini-md-p", real_gemini_dir=real_gemini)
+    assert len(copied) == 1
+
+    target_gemini = get_profile_home_dir("gemini-md-p") / ".gemini"
+    assert (target_gemini / "GEMINI.md").exists()
+    assert (target_gemini / "GEMINI.md").read_text(encoding="utf-8") == "# Gemini Rules"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_sync_profile_settings_symlinks_skills_directory(tmp_path: Path):
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    cfg_dir = real_gemini / "config"
+    cfg_dir.mkdir()
+
+    # Create external skills directory and symlink inside config/skills
+    external_skills = tmp_path / "external_skills"
+    external_skills.mkdir()
+    skill_a = external_skills / "skill_a"
+    skill_a.mkdir()
+    (skill_a / "SKILL.md").write_text("name: skill_a", encoding="utf-8")
+
+    (cfg_dir / "skills").symlink_to(external_skills)
+
+    add_profile("skills-sync-p", kind="managed")
+    sync_profile_settings("skills-sync-p", real_gemini_dir=real_gemini)
+
+    target_gemini = get_profile_home_dir("skills-sync-p") / ".gemini"
+    target_skills = target_gemini / "config" / "skills"
+
+    assert target_skills.is_symlink()
+    assert os.readlink(str(target_skills)) == str(cfg_dir / "skills")
+    assert (target_skills / "skill_a" / "SKILL.md").exists()
+    assert (target_skills / "skill_a" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "name: skill_a"
