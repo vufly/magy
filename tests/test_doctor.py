@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from magy.cli import main
 
 
@@ -231,4 +233,76 @@ def test_doctor_state_root_error(fake_agy, monkeypatch, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["healthy"] is False
     assert any("state directory" in m for m in data["missing_prerequisites"])
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    ["MAGY_CONFIG_DIR", "MAGY_DATA_DIR", "MAGY_STATE_DIR", "MAGY_AGY_CMD"],
+)
+def test_doctor_unknown_user_env_vars(env_var, fake_agy, monkeypatch, capsys):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    monkeypatch.setenv(env_var, "~__magy_missing_user__/path")
+
+    ret = main(["doctor"])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Status: FAILED - missing prerequisites:" in captured.out
+
+    ret_json = main(["doctor", "--json"])
+    assert ret_json == 1
+    captured_json = capsys.readouterr()
+    assert "Traceback" not in captured_json.err
+    data = json.loads(captured_json.out)
+    assert data["healthy"] is False
+    assert len(data["missing_prerequisites"]) > 0
+
+
+def test_doctor_unknown_user_configured_agy_cmd(fake_agy, monkeypatch, capsys):
+    monkeypatch.delenv("MAGY_AGY_CMD", raising=False)
+    from magy.config import get_config_file_path
+
+    cfg_path = get_config_file_path()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        '{"agy_cmd": "~__magy_missing_user__/agy"}', encoding="utf-8"
+    )
+
+    ret = main(["doctor"])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Status: FAILED - missing prerequisites:" in captured.out
+
+    ret_json = main(["doctor", "--json"])
+    assert ret_json == 1
+    captured_json = capsys.readouterr()
+    data = json.loads(captured_json.out)
+    assert data["healthy"] is False
+    assert any("config" in m for m in data["missing_prerequisites"])
+
+
+def test_doctor_root_permission_enforcement_failure(fake_agy, monkeypatch, capsys):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+
+    def _fail_private_dir(path):
+        raise PermissionError(f"Failed to enforce private permissions on {path}")
+
+    monkeypatch.setattr("magy.config.ensure_private_directory", _fail_private_dir)
+
+    ret = main(["doctor"])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Permission denied accessing" in captured.out
+
+    ret_json = main(["doctor", "--json"])
+    assert ret_json == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["healthy"] is False
+    assert any(
+        "Permission denied accessing" in m
+        for m in data["missing_prerequisites"]
+    )
+
 

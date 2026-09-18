@@ -11,6 +11,7 @@ from magy.storage import (
     atomic_write_json,
     ensure_private_directory,
     read_json,
+    safe_expand_path,
 )
 
 APP_NAME = "magy"
@@ -20,10 +21,10 @@ def get_config_dir(create: bool = True) -> Path:
     """Return the user configuration directory for magy."""
     env_dir = os.environ.get("MAGY_CONFIG_DIR")
     if env_dir:
-        path = Path(env_dir).expanduser().resolve()
+        path = safe_expand_path(env_dir)
     else:
         dirs = PlatformDirs(appname=APP_NAME, appauthor=False)
-        path = Path(dirs.user_config_dir).resolve()
+        path = safe_expand_path(dirs.user_config_dir)
     if create:
         ensure_private_directory(path)
     return path
@@ -33,10 +34,10 @@ def get_data_dir(create: bool = True) -> Path:
     """Return the user data directory for magy."""
     env_dir = os.environ.get("MAGY_DATA_DIR")
     if env_dir:
-        path = Path(env_dir).expanduser().resolve()
+        path = safe_expand_path(env_dir)
     else:
         dirs = PlatformDirs(appname=APP_NAME, appauthor=False)
-        path = Path(dirs.user_data_dir).resolve()
+        path = safe_expand_path(dirs.user_data_dir)
     if create:
         ensure_private_directory(path)
     return path
@@ -46,10 +47,10 @@ def get_state_dir(create: bool = True) -> Path:
     """Return the user state directory for magy."""
     env_dir = os.environ.get("MAGY_STATE_DIR")
     if env_dir:
-        path = Path(env_dir).expanduser().resolve()
+        path = safe_expand_path(env_dir)
     else:
         dirs = PlatformDirs(appname=APP_NAME, appauthor=False)
-        path = Path(dirs.user_state_dir).resolve()
+        path = safe_expand_path(dirs.user_state_dir)
     if create:
         ensure_private_directory(path)
     return path
@@ -129,7 +130,7 @@ def load_config_result() -> ConfigLoadResult:
             config=MagyConfig(),
             error=f"Permission denied accessing config{target}: {e}",
         )
-    except OSError as e:
+    except (RuntimeError, OSError) as e:
         target = f" ({path})" if path else ""
         return ConfigLoadResult(
             config=MagyConfig(),

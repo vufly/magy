@@ -88,6 +88,41 @@ def test_ensure_private_directory(tmp_path: Path):
         assert mode == 0o700
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_ensure_private_directory_corrects_permissive(tmp_path: Path):
+    target = tmp_path / "permissive_dir"
+    target.mkdir(mode=0o777, exist_ok=True)
+    os.chmod(target, 0o777)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
+    ensure_private_directory(target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_ensure_private_directory_chmod_failure(tmp_path: Path, monkeypatch):
+    target = tmp_path / "fail_dir"
+
+    def _fail_chmod(path, mode):
+        raise OSError("chmod failed on directory")
+
+    monkeypatch.setattr(os, "chmod", _fail_chmod)
+    with pytest.raises(PermissionError, match="Failed to enforce private permissions"):
+        ensure_private_directory(target)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_ensure_private_directory_insecure_mode_remains(tmp_path: Path, monkeypatch):
+    target = tmp_path / "insecure_dir"
+    target.mkdir()
+    os.chmod(target, 0o777)
+
+    # Monkeypatch chmod to do nothing, leaving mode 0o777
+    monkeypatch.setattr(os, "chmod", lambda path, mode: None)
+    with pytest.raises(PermissionError, match="insecure permissions 0o777"):
+        ensure_private_directory(target)
+
+
 def test_ensure_private_file(tmp_path: Path):
     target = tmp_path / "private.json"
     target.write_text("{}", encoding="utf-8")
@@ -95,6 +130,64 @@ def test_ensure_private_file(tmp_path: Path):
     if os.name != "nt":
         mode = stat.S_IMODE(target.stat().st_mode)
         assert mode == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_ensure_private_file_corrects_permissive(tmp_path: Path):
+    target = tmp_path / "permissive_file.json"
+    target.write_text("{}", encoding="utf-8")
+    os.chmod(target, 0o666)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o666
+
+    ensure_private_file(target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_ensure_private_file_chmod_failure(tmp_path: Path, monkeypatch):
+    target = tmp_path / "fail_file.json"
+    target.write_text("{}", encoding="utf-8")
+
+    def _fail_chmod(path, mode):
+        raise OSError("chmod failed on file")
+
+    monkeypatch.setattr(os, "chmod", _fail_chmod)
+    with pytest.raises(PermissionError, match="Failed to enforce private permissions"):
+        ensure_private_file(target)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_ensure_private_file_insecure_mode_remains(tmp_path: Path, monkeypatch):
+    target = tmp_path / "insecure_file.json"
+    target.write_text("{}", encoding="utf-8")
+    os.chmod(target, 0o666)
+
+    # Monkeypatch chmod to do nothing, leaving mode 0o666
+    monkeypatch.setattr(os, "chmod", lambda path, mode: None)
+    with pytest.raises(PermissionError, match="insecure permissions 0o666"):
+        ensure_private_file(target)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_atomic_write_cleanup_on_chmod_failure(tmp_path: Path, monkeypatch):
+    target = tmp_path / "data_chmod_fail.json"
+
+    real_chmod = os.chmod
+
+    def _fail_chmod_for_file(path, mode):
+        if mode == 0o600:
+            raise PermissionError("chmod denied for file")
+        return real_chmod(path, mode)
+
+    monkeypatch.setattr(os, "chmod", _fail_chmod_for_file)
+
+    with pytest.raises(PermissionError, match="chmod denied for file"):
+        atomic_write_json(target, {"key": "value"}, lock=False)
+
+    assert not target.exists()
+    # Check that temporary files are cleaned up
+    tmp_files = list(tmp_path.glob(".*.tmp.*"))
+    assert len(tmp_files) == 0
 
 
 def test_atomic_write_and_read_json(tmp_path: Path):

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import stat
 import uuid
 from pathlib import Path
 from typing import Any
@@ -57,14 +58,29 @@ def validate_run_id(run_id: str) -> str:
     return validate_identifier(run_id, "run ID")
 
 
+def safe_expand_path(raw_path: str | Path) -> Path:
+    """Expand user and resolve path safely, converting RuntimeError to OSError."""
+    try:
+        return Path(raw_path).expanduser().resolve()
+    except (RuntimeError, OSError) as e:
+        raise OSError(f"Could not resolve path '{raw_path}': {e}") from e
+
+
 def ensure_private_directory(path: Path) -> Path:
     """Create directory and parents with owner-only permissions where supported."""
     path.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
         try:
             os.chmod(path, 0o700)
-        except OSError:
-            pass
+        except OSError as e:
+            raise PermissionError(
+                f"Failed to enforce private permissions on directory {path}: {e}"
+            ) from e
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077 != 0:
+            raise PermissionError(
+                f"Directory {path} has insecure permissions {oct(mode)}, expected 0o700"
+            )
     return path
 
 
@@ -73,8 +89,15 @@ def ensure_private_file(path: Path) -> Path:
     if os.name != "nt" and path.exists():
         try:
             os.chmod(path, 0o600)
-        except OSError:
-            pass
+        except OSError as e:
+            raise PermissionError(
+                f"Failed to enforce private permissions on file {path}: {e}"
+            ) from e
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077 != 0:
+            raise PermissionError(
+                f"File {path} has insecure permissions {oct(mode)}, expected 0o600"
+            )
     return path
 
 

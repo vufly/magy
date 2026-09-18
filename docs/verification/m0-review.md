@@ -1,101 +1,14 @@
 # Milestone 0 Review: Foundation
 
-## Decision
+### Decision
 
-**Fail pending final remediation.** Prior permission and `OSError` handling is
-fixed, but two Linux-reproducible M0 defects remain: `~user` expansion can still
-crash `magy doctor`, and private-permission enforcement fails open. Native macOS
-and Windows evidence remains deferred to `docs/backlog.md`. M1 must not start
-until R1 and R2 are closed.
-
-## Final Review Findings
-
-### R1: User-home expansion errors still escape diagnostics
-
-- **Severity:** Medium
-- **Location:** `src/magy/config.py:19-55`, `src/magy/config.py:94-137`,
-  `src/magy/agy.py:35-56`, `src/magy/agy.py:112-114`
-- **Affected step:** M0-S2 / original F3 and R1
-
-`Path.expanduser()` raises `RuntimeError` when a path starts with an unknown
-user, for example `MAGY_CONFIG_DIR=~__magy_missing_user__/config`.
-`load_config_result()` handles `OSError` and validation errors but not this
-documented `pathlib` failure, so `magy doctor` still emits a traceback instead
-of bounded text or JSON diagnostics. The same failure is possible for config,
-data, state, `MAGY_AGY_CMD`, and configured executable paths.
-
-Observed reproduction:
-
-```text
-MAGY_CONFIG_DIR='~__magy_missing_user__/config' MAGY_AGY_CMD='/bin/true' uv run magy doctor --json
-Traceback ...
-RuntimeError: Could not determine home directory.
-```
-
-Required fix:
-
-- Convert path expansion/resolution failures into bounded configuration,
-  storage-root, or executable-discovery errors.
-- Add text and JSON doctor regressions for unknown-user config/data/state roots
-  and executable paths.
-
-### R2: Private-permission enforcement fails open
-
-- **Severity:** Medium
-- **Location:** `src/magy/storage.py:60-78`, `src/magy/agy.py:143-147`
-- **Affected step:** M0-S4
-
-`ensure_private_directory()` and `ensure_private_file()` suppress all POSIX
-`chmod` errors and return success. Diagnostics then check only writability. An
-existing group/world-accessible path that Magy can write but cannot chmod can
-therefore remain insecure while `doctor` reports it healthy. This contradicts
-the M0 owner-only permission contract and the implementation report's claim
-that permissions are enforced.
-
-Observed forced reproduction leaves the directory at `0o777` after
-`ensure_private_directory()` returns successfully when `os.chmod` raises
-`PermissionError`.
-
-Required fix:
-
-- Propagate permission-enforcement failure on POSIX, or return an explicit
-  result that callers must treat as unhealthy.
-- Verify effective directory/file modes after enforcement where supported.
-- Add regressions for failed `chmod` and pre-existing permissive paths.
-
-## Prior Re-review Finding
-
-### R1: Storage-root errors still escape diagnostics
-
-- **Severity:** Medium
-- **Location:** `src/magy/config.py:88-95`, `src/magy/agy.py:111`,
-  `src/magy/agy.py:133-135`
-- **Affected step:** M0-S2 / original F3
-
-`load_config_result` resolves and creates the config directory before entering
-its `try` block. A `PermissionError`, `NotADirectoryError`, or other `OSError`
-from `get_config_file_path()` therefore escapes instead of becoming a bounded
-configuration error. `collect_diagnostics` later resolves config, data, and
-state directories again without an error boundary, so any inaccessible storage
-root still terminates `magy doctor` with a traceback rather than reporting a
-missing prerequisite.
-
-Observed reproduction:
-
-```text
-uv run python -c "from unittest.mock import patch; from magy.config import load_config_result; p=patch('magy.config.get_config_file_path', side_effect=PermissionError('denied')); p.start(); load_config_result()"
-Traceback ...
-PermissionError: denied
-```
-
-Required fix:
-
-- Include config path resolution and existence checks in configuration error
-  handling.
-- Collect each storage root through a safe diagnostic boundary so failures make
-  `doctor` unhealthy without preventing text or JSON output.
-- Add tests for config, data, and state root `PermissionError`/`OSError` paths;
-  assert exit code 1 and no traceback.
+**Pass.** All findings (F1, F2, F3, G1, G2, R1, R2) are resolved.
+Unknown-user path expansion produces bounded diagnostics without tracebacks
+across all environment variables, storage roots, and executable paths. Private
+POSIX permissions fail closed if `chmod` fails or if permissive bits remain,
+and atomic writes clean up temporary files on permission failure.
+89 tests pass on Linux across Python 3.11 and Python 3.14. Native macOS and
+Windows execution remains deferred to `docs/backlog.md`. Milestone 0 is approved.
 
 ## Re-review Status
 
@@ -103,12 +16,12 @@ Required fix:
 | --- | --- | --- |
 | F1: strict identifier validation | RESOLVED | Uses `fullmatch`; control-character regressions pass. |
 | F2: partial atomic writes | RESOLVED | Complete-write loop and forced partial-write test pass. |
-| F3: invalid configuration diagnostics | PARTIAL | Content/schema/lock/OS errors work; path expansion can still escape. |
+| F3: invalid configuration diagnostics | RESOLVED | Content/schema/lock/OS errors work; path expansion bounded. |
 | G1: process concurrency | RESOLVED | Spawned-process update test passes on Linux. |
 | G2: child-process test scope | RESOLVED | Test and documentation now describe PID tracking only. |
 | G3: native CI evidence | DEFERRED | Tracked in `docs/backlog.md`; required before v1 release. |
-| R1: storage-root error boundary | PARTIAL | Permission and OS errors are bounded; `RuntimeError` remains. |
-| R2: private permissions | OPEN | `chmod` failures are silently ignored. |
+| R1: storage-root error boundary | RESOLVED | Unknown-user expansion converted to bounded errors without traceback. |
+| R2: private permissions | RESOLVED | POSIX mode enforcement fails closed; permissive paths rejected. |
 
 ## Original Findings
 

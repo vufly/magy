@@ -14,6 +14,7 @@ from magy.config import (
     get_state_dir,
     load_config_result,
 )
+from magy.storage import safe_expand_path
 
 
 def _is_executable_file(path: Path) -> bool:
@@ -34,9 +35,12 @@ def resolve_agy_executable(
     """
     env_cmd = os.environ.get("MAGY_AGY_CMD")
     if env_cmd:
-        p = Path(env_cmd).expanduser()
-        if _is_executable_file(p):
-            return p.resolve(), "MAGY_AGY_CMD"
+        try:
+            p = safe_expand_path(env_cmd)
+            if _is_executable_file(p):
+                return p.resolve(), "MAGY_AGY_CMD"
+        except (RuntimeError, OSError):
+            pass
         which_p = shutil.which(env_cmd, path=path_env)
         if which_p:
             return Path(which_p).resolve(), "MAGY_AGY_CMD"
@@ -47,9 +51,12 @@ def resolve_agy_executable(
             return None, f"config (invalid type {type(configured_cmd).__name__})"
         if not configured_cmd.strip():
             return None, "config (empty path)"
-        p = Path(configured_cmd).expanduser()
-        if _is_executable_file(p):
-            return p.resolve(), "config"
+        try:
+            p = safe_expand_path(configured_cmd)
+            if _is_executable_file(p):
+                return p.resolve(), "config"
+        except (RuntimeError, OSError):
+            pass
         which_p = shutil.which(configured_cmd, path=path_env)
         if which_p:
             return Path(which_p).resolve(), "config"
@@ -137,6 +144,8 @@ def collect_diagnostics() -> AgyDiagnostics:
         target_path: Path | None = None
         try:
             target_path = getter_fn(create=False)
+        except (RuntimeError, OSError):
+            target_path = None
         except Exception:
             pass
 
@@ -151,7 +160,7 @@ def collect_diagnostics() -> AgyDiagnostics:
                 target_path,
                 f"Permission denied accessing {name} directory{p_str}: {e}",
             )
-        except OSError as e:
+        except (RuntimeError, OSError) as e:
             p_str = f" ({target_path})" if target_path else ""
             return target_path, f"Error accessing {name} directory{p_str}: {e}"
 
