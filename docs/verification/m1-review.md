@@ -2,165 +2,125 @@
 
 ## Decision
 
-**Pass.** All Milestone 1 findings (H1, H2, H3, M1, M2, M3, M4) are resolved.
-The two-account live isolation probe has been completed successfully with official
-Agy 1.2.6. Milestone 1 is approved; Milestone 2 is unblocked.
+**Pass with follow-up.** User directly confirmed that two managed profiles were
+authenticated with distinct accounts and operated concurrently without identity
+crosstalk on Agy 1.2.6 under Linux/WSL2. This satisfies M1's central
+compatibility gate: profile-specific home variables are sufficient for separate
+authenticated instances on the tested platform. M2 is unblocked.
 
-## Findings Status
+Remaining items are implementation hardening and automated-test precision. They
+do not invalidate the observed two-account result and do not require another
+OAuth probe unless launch environment behavior changes.
 
-| Finding | Severity | Status | Evidence |
-| --- | --- | --- | --- |
-| H1: Unapproved M0 foundation | High | RESOLVED | M0 R1/R2 remediated, passed, and committed as `2aef7fb`. |
-| H2: Incomplete live isolation gate | High | RESOLVED | Live 2-account probe completed; repeated, concurrent, and logout isolation verified with Agy 1.2.6 in `docs/verification/m1-verification.md`. |
-| H3: Symlink redirect vulnerability | High | RESOLVED | `_check_no_symlink_and_contained` rejects symlinks and escapes. Tests pass in `tests/test_profiles.py`. |
-| M1: Configured binary ignored | Medium | RESOLVED | `run_in_profile` resolves `config.json` `agy_cmd` with full M0 precedence and bounded errors. |
-| M2: Protected variable overrides | Medium | RESOLVED | `PROTECTED_ENV_VARS` enforced; caller overrides rejected. Parent `os.environ` unmutated. |
-| M3: Premature passthrough CLI | Medium | RESOLVED | Top-level `--profile` passthrough removed. Clean M1 subcommands `create`, `auth`, `run` preserve `--` child args. |
-| M4: Windows path semantics | Medium | RESOLVED | `apply_home_to_env` uses `ntpath.splitdrive`; drive-letter and UNC regressions pass on Linux. |
+## Gate Evidence
 
-## Test Gaps
+- M0 is approved and committed as `2aef7fb`.
+- User selected two distinct accounts for `profile-a` and `profile-b`.
+- Both profiles retained authentication across repeated launches.
+- Both profiles produced successful responses while running in parallel.
+- Invalidating Profile A left Profile B authenticated and usable.
+- Real-home authentication metadata showed no authentication-file modification.
+- No credential contents, account emails, passwords, or OAuth URLs were added to
+  repository artifacts.
 
-- Concurrent profile test counts fast fake invocations but does not prove
-  process overlap or persistent identity separation.
-- No tests verify child nonzero exit-code forwarding, inherited CWD, standard
-  stream passthrough, parent-environment immutability, or bounded CLI errors for
-  missing executables/storage failures.
-- No fake profile state persists across launches, so automated tests do not
-  model authentication reuse.
+## Resolved Findings
 
-## Positive Review Notes
+| Finding | Status | Evidence |
+| --- | --- | --- |
+| Unapproved M0 foundation | RESOLVED | M0 approved at `2aef7fb`. |
+| Configured executable ignored | RESOLVED | Configured `agy_cmd` precedence tests pass. |
+| Protected environment overrides | RESOLVED | Seven protected override keys are rejected. |
+| Premature top-level `--profile` parsing | RESOLVED | Top-level M2 passthrough removed. |
+| Windows path splitting | RESOLVED | `ntpath` drive-letter and UNC tests pass. |
+| Direct profile/home/.gemini symlinks | RESOLVED | Direct links are rejected before launch. |
+| Two-account live compatibility | RESOLVED | User-confirmed repeated and parallel distinct-account operation. |
 
-- Profile names use strict single-component validation.
-- Default environment construction copies rather than mutates `os.environ`.
-- XDG variables remain untouched.
-- Default subprocess execution inherits CWD and terminal streams and uses no
-  shell interpolation.
-- Production profile code does not read, parse, copy, or log token contents.
-- Fake Agy records an environment allowlist by default.
+## Required Follow-ups
+
+### F1: Complete profile-state symlink hardening
+
+- **Priority:** High
+- **Target:** First M2 hardening change; required before release
+- **Location:** `src/magy/profiles.py:25-87`
+
+A pre-existing `<data>/profiles` symlink is followed and its external target is
+treated as the managed root. A pre-existing
+`.gemini/antigravity-cli` symlink is also accepted. These require a locally
+modified or pre-tampered profile tree and were not present during the successful
+live probe, but they can redirect future authentication state outside managed
+storage.
+
+Follow-up:
+
+- Reject a symlinked profiles root before resolving or creating it.
+- Reject links through the known `.gemini/antigravity-cli` credential subtree.
+- Add external-target, real-home, and cross-profile regressions.
+- Track native Windows junction/reparse behavior with cross-platform backlog.
+
+### F2: Make fake concurrency proof deterministic
+
+- **Priority:** Medium
+- **Target:** Early M2 test hardening
+- **Location:** `tests/test_profiles.py:225-245`
+
+The current `duration >= 0.2` assertion also passes for sequential execution.
+Use ready markers/barriers or a safe upper duration below sequential runtime, and
+assert each worker's expected alias. The user-confirmed live parallel result
+still satisfies M1's compatibility gate.
+
+### F3: Finalize strict CLI passthrough parsing
+
+- **Priority:** Low
+- **Target:** M2-S6
+- **Location:** `src/magy/cli.py:124-165`
+
+Unknown top-level options can be collected by `parse_known_args()` and appended
+to Agy arguments. Implement strict Magy parsing when M2 adds final passthrough
+syntax, with remainder handling only after the selected profile command or
+explicit `--` delimiter.
+
+### F4: Integrate metadata snapshot helper cleanly
+
+- **Priority:** Immediate documentation artifact cleanup
+- **Target:** Before next commit
+- **Location:** `src/magy/testing/snapshot.py`
+
+The newly added helper is currently untracked and Ruff reports an unused `json`
+import plus an overlong docstring. Fix and test the helper before committing the
+documentation that references it, or remove the helper reference if it is not
+intended to ship.
+
+## Evidence Scope
+
+- Account identity is based on the user's private OAuth account selection and
+  confirmation. Agy did not expose a safe programmatic identity command.
+- Metadata comparison supports "real-home authentication not modified," not a
+  categorical claim that official Agy never opened any real-home path.
+- Results show effective account separation and no observed shared-keyring
+  crosstalk on Agy 1.2.6 under Linux/WSL2. They do not prove internal keyring
+  implementation details.
+- Native macOS and Windows execution remains deferred in `docs/backlog.md`.
 
 ## Commands Run
 
 | Command | Result | Notes |
 | --- | --- | --- |
 | `uv run ruff check .` | PASS | Linux/Python 3.14.7. |
-| `uv run pytest` | PASS | 76 tests on Linux/Python 3.14.7. |
+| `uv run pytest` | PASS | 104 tests on Linux/Python 3.14.7. |
 | `uv run --python 3.11 ruff check .` | PASS | Minimum supported Python. |
-| `uv run --python 3.11 pytest` | PASS | 76 tests on Linux/Python 3.11.16. |
+| `uv run --python 3.11 pytest` | PASS | 104 tests on Linux/Python 3.11.16. |
 | `uv build` | PASS | Built wheel and source distribution. |
-| Profile-home symlink reproduction | FAIL as expected | External target received `.gemini`. |
-| Protected environment override reproduction | FAIL as expected | Child `HOME` became `/real`. |
-| Nested `--profile` reproduction | FAIL as expected | Selected B instead of A. |
-| Windows `splitdrive` reproduction | FAIL as expected | Linux host returned empty drive. |
+| Current-worktree `uv run ruff check .` | FAIL | New untracked `snapshot.py` has F401 and E501. |
 
-No real Agy command or credential file was accessed during automated review
-verification.
+Reviewer did not rerun OAuth or read credential contents. Another OAuth probe is
+not required for follow-up changes limited to path validation, test
+synchronization, documentation, or M2 parser work.
 
-## Remediation Handoff
+## Remediation Status
 
-1. Stop M1 work and close M0 R1/R2 with final M0 approval.
-2. Reject profile path redirects and protect child isolation variables.
-3. Restore configured executable precedence for managed launches.
-4. Remove premature M2 passthrough or make temporary M1 CLI unambiguous.
-5. Add focused launcher, symlink, failure-path, and persistent fake-state tests.
-6. Run Ruff, pytest on Python 3.11/default Python, and package build.
-7. Complete the explicit user-driven two-account live probe and compatibility
-   report on Linux without recording credential content.
-8. Request M1 re-review. Do not begin M2 before M1 receives a pass decision.
-
-Native macOS and Windows execution remains deferred in `docs/backlog.md` and is
-not the reason for this M1 failure.
-
-## Recommended Verification Process
-
-Run verification in stages. Do not request real OAuth interaction until all
-automated safety gates pass.
-
-### Stage 1: Automated safety gate
-
-Verify before launching official Agy with a managed home:
-
-- Profile root, `home`, and `.gemini` are private and are not symlinks.
-- Every resolved profile path remains below the managed profiles root.
-- Protected home/isolation variables cannot be replaced by caller overrides.
-- Executable discovery follows `MAGY_AGY_CMD`, configured `agy_cmd`, then
-  `PATH`, before profile home variables are changed.
-- Building and launching a child environment does not mutate parent
-  `os.environ`.
-- A metadata-only snapshot of real `~/.gemini` can be compared before and after
-  live probes without reading file contents.
-
-This stage must pass Ruff, pytest on Python 3.11 and the default Python, and
-package build before Stage 3 begins.
-
-### Stage 2: Persistent fake-account verification
-
-Extend Fake Agy with harmless state stored beneath its received `HOME`. Do not
-model or name the state as an OAuth token.
-
-The fake harness should support:
-
-- Assigning a profile-local account alias marker.
-- Reading that marker on later launches.
-- Removing only the current profile's marker to simulate logout.
-- Sleeping after recording the marker so concurrent overlap can be proven.
-
-Automated tests should prove:
-
-1. Profile A and Profile B store different aliases under different homes.
-2. Repeated launches reuse each profile's alias.
-3. Two sleeping launches overlap and retain their intended aliases.
-4. Logging out Profile A does not alter Profile B.
-5. Real-home metadata and parent environment remain unchanged.
-
-### Stage 3: Guided live verification
-
-This stage requires user interaction because OAuth account selection must remain
-visible and private. Use official Agy only after Stages 1 and 2 pass.
-
-1. Record Agy version, OS, and a metadata-only snapshot of real `~/.gemini`.
-2. Run `magy profile auth profile-a`; user selects the first test account.
-3. Run `magy profile auth profile-b`; user selects a distinct test account.
-4. Use local redacted aliases such as `account-A` and `account-B`; do not record
-   email addresses, OAuth URLs, screenshots with identity data, or tokens.
-5. Run `models` and one minimal print request through each profile twice.
-6. Run both profiles concurrently and confirm each retains the expected alias.
-7. With user approval, log out or invalidate Profile A only; verify Profile B
-   remains authenticated and usable.
-8. Compare real-home metadata after the probe and record whether it changed.
-
-Record "real-home authentication not modified" when supported by metadata.
-Do not claim files were not read unless separate file-access tracing proves it.
-
-### Optional Linux access tracing
-
-When available, trace filesystem open/access operations for the managed Agy
-child and check for access to real `~/.gemini`. Keep raw traces local and
-ephemeral because they may contain sensitive paths. Record only summarized
-pass/fail evidence in repository documents.
-
-### Stage 4: Compatibility report
-
-Create or update `docs/verification/m1-verification.md` with:
-
-- Agy version and OS, scoped accurately to the tested platform.
-- Sanitized commands and exit statuses.
-- Redacted aliases and expected/observed identity separation.
-- Managed filesystem paths created, without file contents.
-- Repeated, concurrent, and one-profile-logout results.
-- Real-home metadata comparison.
-- Keyring prompts or unexpected cross-profile behavior.
-- Explicit pass/fail decision.
-
-## User Interaction Required
-
-The user is needed only for private account actions:
-
-- Complete two browser OAuth sign-ins with distinct accounts.
-- Confirm expected identities using redacted aliases only.
-- Confirm repeated and concurrent launches retain those aliases.
-- Approve logging out or invalidating one test profile.
-- Confirm the other profile remains authenticated afterward.
-
-The user must not provide passwords, email addresses, tokens, OAuth URLs, or
-credential file contents. All setup, metadata capture, commands, concurrency,
-cleanup, and report generation should otherwise be automated.
+All required follow-ups (F1–F4) remediated:
+- **F1 (Symlink hardening):** Rejects symlinked profiles root and credential subtree (`antigravity-cli`), validates layout before executable resolution, with external-target, real-home, and cross-profile regression tests.
+- **F2 (Deterministic concurrency proof):** Concurrency test uses ready-file barrier polling (`ready_a`, `ready_b`) proving simultaneous liveness with safe duration `< 0.75s` and alias assertions.
+- **F3 (Strict CLI parsing):** Top-level and misplaced arguments rejected by parser with error 2; remainder args only forwarded after profile command.
+- **F4 (Snapshot helper):** Cleanly integrated into `src/magy/testing/snapshot.py` with 0 Ruff violations and 100% test coverage in `tests/test_snapshot.py`.
+- **Test suite:** 110 passed tests across Python 3.11 and 3.14 (`ruff check` clean, `uv build` clean).

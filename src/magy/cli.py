@@ -148,10 +148,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
 
         elif args.profile_action in ("auth", "run"):
+            if remaining:
+                parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
             extra = list(getattr(args, "extra_args", []))
             if extra and extra[0] == "--":
                 extra = extra[1:]
-            extra.extend(remaining)
             try:
                 return run_in_profile(args.name, extra)
             except (ValueError, FileNotFoundError, PermissionError, OSError) as e:

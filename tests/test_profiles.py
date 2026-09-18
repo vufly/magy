@@ -1,5 +1,6 @@
 import concurrent.futures
 import os
+import shutil
 import stat
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from magy.profiles import (
     get_profile_dir,
     get_profile_home_dir,
     run_in_profile,
+    validate_profile_layout,
 )
 
 
@@ -78,6 +80,81 @@ def test_ensure_profile_layout_rejects_symlink_gemini_dir(tmp_path: Path):
 
     with pytest.raises(ValueError, match="cannot be a symlink"):
         ensure_profile_layout("symlink-gemini")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_ensure_profile_layout_rejects_symlink_profiles_root(tmp_path: Path):
+    from magy.config import get_data_dir
+    data_dir = get_data_dir()
+    external_dir = tmp_path / "external_profiles_root"
+    external_dir.mkdir()
+
+    profiles_link = data_dir / "profiles"
+    if profiles_link.exists():
+        if profiles_link.is_dir() and not profiles_link.is_symlink():
+            import shutil
+            shutil.rmtree(profiles_link)
+        else:
+            profiles_link.unlink()
+    profiles_link.symlink_to(external_dir)
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        ensure_profile_layout("symlink-root-profile")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_ensure_profile_layout_rejects_symlink_credential_subtree(tmp_path: Path):
+    p_dir, p_home = ensure_profile_layout("symlink-cred")
+    gemini_dir = p_home / ".gemini"
+    external_creds = tmp_path / "external_creds"
+    external_creds.mkdir()
+
+    cli_dir = gemini_dir / "antigravity-cli"
+    cli_dir.symlink_to(external_creds)
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        validate_profile_layout("symlink-cred")
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        ensure_profile_layout("symlink-cred")
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        run_in_profile("symlink-cred", ["models"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_profile_layout_rejects_real_home_symlink(tmp_path: Path):
+    real_home = tmp_path / "user_real_home"
+    real_gemini = real_home / ".gemini"
+    real_gemini.mkdir(parents=True)
+
+    p_dir, p_home = ensure_profile_layout("real-home-symlink")
+    gemini_dir = p_home / ".gemini"
+    shutil.rmtree(gemini_dir)
+    gemini_dir.symlink_to(real_gemini)
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        validate_profile_layout("real-home-symlink")
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        run_in_profile("real-home-symlink", ["models"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_profile_layout_rejects_cross_profile_symlink():
+    ensure_profile_layout("profile-alpha")
+    _p_dir_beta, p_home_beta = ensure_profile_layout("profile-beta")
+
+    alpha_gemini = get_profile_home_dir("profile-alpha") / ".gemini"
+    beta_gemini = p_home_beta / ".gemini"
+    shutil.rmtree(beta_gemini)
+    beta_gemini.symlink_to(alpha_gemini)
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        validate_profile_layout("profile-beta")
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        run_in_profile("profile-beta", ["models"])
 
 
 def test_build_profile_env_posix():
@@ -194,7 +271,7 @@ def test_run_in_profile_invalid_config_fails_cleanly(fake_agy, monkeypatch):
         run_in_profile("bad-cfg", ["models"])
 
 
-def test_stage2_persistent_fake_accounts(fake_agy, monkeypatch):
+def test_stage2_persistent_fake_accounts(fake_agy, monkeypatch, tmp_path: Path):
     """Stage 2 verification: persistent account alias markers in profile homes."""
     monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
 
@@ -223,10 +300,14 @@ def test_stage2_persistent_fake_accounts(fake_agy, monkeypatch):
     assert res_b.stdout.strip() == "account-B"
 
     # 3. Two concurrent sleeping launches overlap and retain their intended aliases
-    def _concurrent_worker(p_name: str, expected_alias: str):
+    ready_a = tmp_path / "ready_a.txt"
+    ready_b = tmp_path / "ready_b.txt"
+
+    def _concurrent_worker(p_name: str, expected_alias: str, ready_file: Path):
         res = run_in_profile(
             p_name,
-            ["--sleep", "0.2", "whoami"],
+            ["--sleep", "0.4", "whoami"],
+            env_overrides={"FAKE_AGY_READY_FILE": str(ready_file)},
             capture_output=True,
         )
         assert res.returncode == 0
@@ -234,15 +315,25 @@ def test_stage2_persistent_fake_accounts(fake_agy, monkeypatch):
 
     t0 = time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        fut_a = executor.submit(_concurrent_worker, "profile-a", "account-A")
-        fut_b = executor.submit(_concurrent_worker, "profile-b", "account-B")
+        fut_a = executor.submit(_concurrent_worker, "profile-a", "account-A", ready_a)
+        fut_b = executor.submit(_concurrent_worker, "profile-b", "account-B", ready_b)
+
+        both_active = False
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if ready_a.exists() and ready_b.exists():
+                both_active = True
+                break
+            time.sleep(0.01)
+
         out_a = fut_a.result()
         out_b = fut_b.result()
     dur = time.time() - t0
 
+    assert both_active is True, "Both workers must be simultaneously active"
     assert out_a == "account-A"
     assert out_b == "account-B"
-    assert dur >= 0.2  # Proves execution overlap
+    assert dur < 0.75  # Less than sequential execution (0.4 + 0.4 = 0.8s)
 
     # 4. Logging out Profile A leaves Profile B intact
     ret_logout = run_in_profile("profile-a", ["--logout"])
@@ -308,3 +399,17 @@ def test_cli_profile_missing_executable_error(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Traceback" not in captured.err
     assert "magy: error:" in captured.err
+
+
+def test_cli_profile_rejects_unknown_top_level_options():
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--unknown-opt", "profile", "run", "test-p", "models"])
+    assert exc_info.value.code == 2
+
+    with pytest.raises(SystemExit) as exc_info2:
+        main(["profile", "--unknown-opt", "run", "test-p", "models"])
+    assert exc_info2.value.code == 2
+
+    with pytest.raises(SystemExit) as exc_info3:
+        main(["profile", "create", "test-p", "--unexpected"])
+    assert exc_info3.value.code == 2

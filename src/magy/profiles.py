@@ -22,23 +22,6 @@ PROTECTED_ENV_VARS = frozenset({
 })
 
 
-def get_profiles_dir() -> Path:
-    """Return the managed profiles root directory with owner-only permissions."""
-    path = get_data_dir() / "profiles"
-    return ensure_private_directory(path)
-
-
-def get_profile_dir(name: str) -> Path:
-    """Return the directory for a specific profile."""
-    validated = validate_profile_name(name)
-    return get_profiles_dir() / validated
-
-
-def get_profile_home_dir(name: str) -> Path:
-    """Return the synthetic home directory for a profile."""
-    return get_profile_dir(name) / "home"
-
-
 def _check_no_symlink_and_contained(
     path: Path, expected_parent: Path, description: str
 ) -> None:
@@ -57,6 +40,43 @@ def _check_no_symlink_and_contained(
                 f"{description} '{path}' resolves to '{resolved}', "
                 f"which is outside '{parent_resolved}'"
             )
+
+
+def get_profiles_dir() -> Path:
+    """Return the managed profiles root directory with owner-only permissions."""
+    data_dir = get_data_dir()
+    path = data_dir / "profiles"
+    _check_no_symlink_and_contained(path, data_dir, "Profiles root directory")
+    ensure_private_directory(path)
+    _check_no_symlink_and_contained(path, data_dir, "Profiles root directory")
+    return path
+
+
+def get_profile_dir(name: str) -> Path:
+    """Return the directory for a specific profile."""
+    validated = validate_profile_name(name)
+    return get_profiles_dir() / validated
+
+
+def get_profile_home_dir(name: str) -> Path:
+    """Return the synthetic home directory for a profile."""
+    return get_profile_dir(name) / "home"
+
+
+def validate_profile_layout(name: str) -> None:
+    """Validate that existing profile layout contains no symlink redirects."""
+    profiles_root = get_profiles_dir().resolve()
+    p_dir = get_profile_dir(name)
+    _check_no_symlink_and_contained(p_dir, profiles_root, "Profile directory")
+
+    p_home = p_dir / "home"
+    _check_no_symlink_and_contained(p_home, p_dir, "Profile home directory")
+
+    gemini_dir = p_home / ".gemini"
+    _check_no_symlink_and_contained(gemini_dir, p_home, "Profile .gemini directory")
+
+    cli_dir = gemini_dir / "antigravity-cli"
+    _check_no_symlink_and_contained(cli_dir, gemini_dir, "Credential directory")
 
 
 def ensure_profile_layout(name: str) -> tuple[Path, Path]:
@@ -86,6 +106,7 @@ def ensure_profile_layout(name: str) -> tuple[Path, Path]:
     ensure_private_directory(gemini_dir)
     _check_no_symlink_and_contained(gemini_dir, p_home, "Profile .gemini directory")
 
+    validate_profile_layout(name)
     return p_dir, p_home
 
 
@@ -148,6 +169,8 @@ def run_in_profile(
     timeout: float | None = None,
 ) -> Any:
     """Run an Agy command within the profile's isolated environment."""
+    validate_profile_layout(name)
+
     if executable is None:
         cfg_res = load_config_result()
         if cfg_res.error:

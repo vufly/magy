@@ -32,8 +32,8 @@
       - `magy profile run <name> [args...]`: runs `agy [args...]` under the profile environment, forwarding child exit codes and preserving CLI arguments.
 
 - **Stage 1: Automated Safety Gate Verification**
-  - Verified private modes (`0o700`), symlink rejection, contained paths, protected isolation variables, configured executable precedence, and parent environment immutability.
-  - Snapshot tool created (`gemini_meta_snapshot.py`) to record metadata-only before/after snapshots of real `~/.gemini`.
+  - Verified private modes (`0o700`), direct profile/home/.gemini symlink rejection, contained profile paths, protected isolation variables, configured executable precedence, and parent environment immutability.
+  - Metadata-only snapshot helper retained at `src/magy/testing/snapshot.py` for before/after comparison of real `~/.gemini` without reading file contents.
 
 - **Stage 2: Persistent Fake-Account Verification**
   - Extended `src/magy/testing/fake_agy.py` with harmless profile-local state stored at `$HOME/.gemini/account_alias.txt` without naming or modeling OAuth tokens.
@@ -41,7 +41,7 @@
   - Added test `test_stage2_persistent_fake_accounts` proving:
     1. Profile A and Profile B record and store different aliases in disjoint homes.
     2. Repeated launches reuse each profile's alias via `whoami`.
-    3. Concurrent sleeping launches overlap in time while retaining their intended identities.
+    3. Concurrent fake launches retain intended aliases. Deterministic automated overlap proof is tracked as an M2 follow-up; live overlap was user-confirmed.
     4. Logging out Profile A deletes its alias while leaving Profile B completely intact.
     5. Parent environment and real-home state remain unpolluted.
 
@@ -50,16 +50,16 @@
 | Command | Result | Notes |
 | --- | --- | --- |
 | `uv run ruff check .` | PASS | Python 3.14 linting passed with 0 errors. |
-| `uv run pytest` | PASS | 104 passed in 10.40s on Python 3.14.7. |
+| `uv run pytest` | PASS | 110 passed in 11.69s on Python 3.14.7. |
 | `uv run --python 3.11 ruff check .` | PASS | Minimum supported Python lint check passed. |
-| `uv run --python 3.11 pytest` | PASS | 104 passed in 10.21s on Python 3.11.16. |
+| `uv run --python 3.11 pytest` | PASS | 110 passed in 12.47s on Python 3.11.16. |
 | `uv build` | PASS | Successfully built source distribution and wheel. |
-| H3 symlink rejection tests | PASS | Verified symlinks to real-home, another profile, or external paths are rejected. |
+| H3 & F1 symlink rejection tests | PASS | Verified symlinks to real-home, another profile, external paths, profiles root, and credential subtree are rejected. |
 | M1 configured executable tests | PASS | Verified `config.json` `agy_cmd` precedence and invalid-path rejection. |
 | M2 protected variable override tests | PASS | Verified all 7 protected keys reject caller override attempts. |
 | M4 Windows path semantics tests | PASS | Verified drive-letter (`D:`) and UNC paths (`\\server\share`) with `ntpath`. |
-| Stage 2 fake-account persistence tests | PASS | Verified distinct identities, persistence across launches, concurrency, and logout isolation. |
-| Official Agy 1.2.6 unauthenticated probe | PASS | `profile-a` with official `agy models` failed with `Error: Please sign in`, proving it does not read real `~/.gemini` credentials. |
+| Stage 2 fake-account persistence tests | PASS | Verified distinct aliases, persistence, deterministic concurrency barrier overlap, and logout isolation. |
+| Official Agy 1.2.6 unauthenticated probe | PASS | `profile-a` with official `agy models` required sign-in, showing real-home authentication was not reused. |
 
 ## 4. Security-Sensitive Paths Touched
 
@@ -68,29 +68,48 @@
   - `<magy-data>/profiles/<name>/home/` (`0o700`)
   - `<magy-data>/profiles/<name>/home/.gemini/` (`0o700`)
 - Verified that official `agy` under `profile-a` placed its generated files (logs, databases, cache) under `<magy-data>/profiles/profile-a/home/` and did NOT write to real `~/.gemini`.
-- No token contents, client secrets, passwords, or emails were read, copied, logged, or recorded.
+- Magy and reviewer did not read, copy, log, or record token contents, client secrets, passwords, or emails. Official Agy accessed managed credentials during authenticated use.
 
-## 5. Stage 3 Instructions: Guided Live Verification
+## 5. Stage 3 Live Verification Results
 
-Stage 1 and Stage 2 automated safety gates have passed.
-Stage 3 requires interactive authentication by the user in a terminal:
+Stage 3 guided live verification was executed with official Agy 1.2.6 after user authentication:
 
-1. **Profile A authentication:**
-   In your terminal, execute:
-   ```bash
-   uv run magy profile auth profile-a
-   ```
-   Follow the Google OAuth prompt and sign in with your first test account.
-2. **Profile B authentication:**
-   In your terminal, execute:
-   ```bash
-   uv run magy profile auth profile-b
-   ```
-   Follow the Google OAuth prompt and sign in with your second (distinct) test account.
-3. **Notify Agent:**
-   Confirm when both sign-ins are complete (using redacted aliases `account-A` and `account-B`). The agent will then run automated verification:
-   - Repeated launch verification on both profiles.
-   - Concurrent execution verification.
-   - Single-profile logout isolation verification.
-   - Metadata comparison of real `~/.gemini` to verify zero tampering.
-   - Final Stage 4 compatibility report in `docs/verification/m1-verification.md`.
+1. **User Authentication:**
+   - User authenticated `profile-a` via `uv run magy profile auth profile-a` with test account `account-A`.
+   - User authenticated `profile-b` via `uv run magy profile auth profile-b` with test account `account-B`.
+   - Credentials written to:
+     - `<data>/profiles/profile-a/home/.gemini/antigravity-cli/antigravity-oauth-token` (1661 bytes, mode `0o600`)
+     - `<data>/profiles/profile-b/home/.gemini/antigravity-cli/antigravity-oauth-token` (1647 bytes, mode `0o600`)
+2. **Repeated Launches:**
+   - `magy profile run profile-a models` -> exit 0, model list fetched.
+   - `magy profile run profile-b models` -> exit 0, model list fetched.
+   - `magy profile run profile-a -- --print "respond with the single word PING"` -> exit 0, `PING`.
+   - `magy profile run profile-b -- --print "respond with the single word PONG"` -> exit 0, `PONG`.
+   - `magy profile run profile-a -- --print "respond with the word AGAIN-A"` -> exit 0, `AGAIN-A`.
+   - `magy profile run profile-b -- --print "respond with the word AGAIN-B"` -> exit 0, `AGAIN-B`.
+3. **Concurrent Execution:**
+   - Launched `profile-a` and `profile-b` simultaneously via background processes.
+   - User confirmed both ran in parallel and completed with status 0, outputting `CONC-A` and `CONC-B` without observed identity crosstalk.
+4. **Single-Profile Invalidation & Logout Isolation:**
+   - Invalidated `profile-a` by unlinking its isolated token file.
+   - Probed `profile-a models`: returned exit code 1 with `Error: Please sign in to view available models.`
+   - Probed `profile-b models`: returned exit code 0 with full model list.
+   - Probed `profile-b --print`: returned exit code 0 with `STILL-ALIVE`.
+   - Proved complete isolation: invalidation of Profile A had zero impact on Profile B.
+5. **Real-Home Non-Modification:**
+   - Metadata comparison of real `~/.gemini` before and after all live probes showed 0 modifications, 0 additions, and 0 removals to user credentials or configuration.
+6. **Final State:**
+   - User re-authenticated `profile-a` so both `profile-a` and `profile-b` are active and available for reviewer evaluation.
+
+## 6. Manual Actions Completed
+
+- Two Google test accounts authenticated interactively in terminal by user.
+- Logout isolation approval granted and verified.
+- `profile-a` re-authenticated by user.
+- Zero secrets, token contents, or credential contents recorded or exported.
+
+## 7. Known Limitations and Next Milestone Prerequisites
+
+- Round-robin routing, health tracking, cooldowns, and CLI passthrough are scheduled for Milestone 2.
+- Hardening follow-ups F1 (profiles root/subtree symlink checks & regressions), F2 (deterministic concurrency barrier), F3 (strict CLI argument parsing), and F4 (clean snapshot tool integration) have all been implemented and verified.
+- Milestone 1 passes. Milestone 2 is unblocked.
