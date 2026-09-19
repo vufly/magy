@@ -1,6 +1,7 @@
 import concurrent.futures
 import os
 import shutil
+import signal
 import stat
 import sys
 import time
@@ -630,7 +631,10 @@ def test_run_in_profile_signal_exit_code_normalized(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Process group and signals for POSIX")
-def test_run_in_profile_timeout_kills_descendant_ignoring_sigterm(tmp_path):
+@pytest.mark.parametrize("capture_output", [False, True])
+def test_run_in_profile_timeout_kills_descendant_ignoring_sigterm(
+    tmp_path, capture_output
+):
     """H2: Timeout escalates to SIGKILL and kills descendant ignoring SIGTERM.
 
     Verifies process group cleanup completes even if the direct child exits.
@@ -645,6 +649,9 @@ def test_run_in_profile_timeout_kills_descendant_ignoring_sigterm(tmp_path):
     descendant_script = tmp_path / "descendant.py"
     descendant_script.write_text(
         "import os, signal, time, pathlib\n"
+        "if os.fork() > 0: os._exit(0)\n"
+        "os.setsid()\n"
+        "if os.fork() > 0: os._exit(0)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         f"pathlib.Path(r'{pid_file}').write_text(str(os.getpid()))\n"
         "time.sleep(30)\n",
@@ -668,7 +675,7 @@ def test_run_in_profile_timeout_kills_descendant_ignoring_sigterm(tmp_path):
             "timeout-descendant-p",
             [str(direct_script)],
             executable=Path(sys.executable),
-            capture_output=True,
+            capture_output=capture_output,
             timeout=0.3,
             update_health=True,
         )
@@ -707,6 +714,7 @@ def test_remove_profile_legacy_registry_migration_and_removal():
                 "enabled": True,
                 "created_at": 1700000000.0,
                 "health": "healthy",
+                "cooldown_reason": "Incorrect API key provided: sk-proj-fake-secret",
             }
         },
     }
@@ -717,6 +725,10 @@ def test_remove_profile_legacy_registry_migration_and_removal():
     profs = load_profiles()
     assert "legacy-p" in profs
     assert profs["legacy-p"].incarnation_id is not None
+    assert (
+        profs["legacy-p"].cooldown_reason
+        == "Failure details removed during security migration"
+    )
 
     # remove_profile succeeds without incarnation mismatch
     remove_profile("legacy-p")
@@ -741,3 +753,110 @@ def test_lifecycle_lease_locking_helpers(monkeypatch):
 
     with pytest.raises(NotImplementedError, match="not supported"):
         magy.profiles._lock_fd(123, exclusive=True)
+
+
+def test_remove_profile_retries_staged_storage_deletion(monkeypatch):
+    import magy.profiles
+
+    add_profile("cleanup-rollback-p", kind="managed")
+    profile_dir = get_profile_dir("cleanup-rollback-p")
+    original_rmtree = shutil.rmtree
+
+    def _fail_staged_delete(path, *args, **kwargs):
+        if Path(path).name.startswith(".deleting_cleanup-rollback-p_"):
+            raise OSError("simulated cleanup failure")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(magy.profiles.shutil, "rmtree", _fail_staged_delete)
+
+    with pytest.raises(OSError, match="run profile remove again"):
+        magy.profiles.remove_profile("cleanup-rollback-p")
+
+    assert get_profile("cleanup-rollback-p") is None
+    assert not profile_dir.exists()
+    assert list(profile_dir.parent.glob(".deleting_cleanup-rollback-p_*"))
+
+    with pytest.raises(RuntimeError, match="pending removal cleanup"):
+        add_profile("cleanup-rollback-p", kind="managed")
+
+    monkeypatch.setattr(magy.profiles.shutil, "rmtree", original_rmtree)
+    magy.profiles.remove_profile("cleanup-rollback-p")
+    assert not list(profile_dir.parent.glob(".deleting_cleanup-rollback-p_*"))
+
+
+def test_remove_profile_cleans_private_run_logs():
+    from magy.config import get_state_dir
+    from magy.profiles import remove_profile
+
+    add_profile("log-cleanup-p", kind="managed")
+    logs_dir = get_state_dir() / "logs" / "log-cleanup-p"
+    logs_dir.mkdir(parents=True)
+    (logs_dir / "run.log").write_text("private diagnostic", encoding="utf-8")
+
+    remove_profile("log-cleanup-p")
+
+    assert not logs_dir.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Process group and signals for POSIX")
+def test_forwarded_sigterm_escalates_for_ignoring_child(tmp_path):
+    import subprocess
+
+    runner = (
+        "import signal, sys\n"
+        "from pathlib import Path\n"
+        "from magy.profiles import add_profile, run_in_profile\n"
+        "add_profile('signal-ignore-p')\n"
+        'child = ("import signal, time; "\n'
+        '         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "\n'
+        '         "time.sleep(30)")\n'
+        "raise SystemExit(run_in_profile(\n"
+        "    'signal-ignore-p', ['-c', child], executable=Path(sys.executable)\n"
+        "))\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", runner],
+        env=os.environ,
+        process_group=0,
+    )
+    time.sleep(0.5)
+    os.kill(proc.pid, signal.SIGTERM)
+
+    assert proc.wait(timeout=5.0) == 137
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX job control")
+def test_stopped_interactive_child_does_not_steal_terminal_after_bg(monkeypatch):
+    import magy.profiles
+
+    class FakeProcess:
+        pid = 4321
+        args = ["fake"]
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    stopped_status = (signal.SIGTSTP << 8) | 0x7F
+    statuses = iter([(4321, stopped_status), (4321, 0)])
+    foreground_groups = iter([4321, 9999])
+    foreground_changes = []
+    signals = []
+
+    monkeypatch.setattr(os, "waitpid", lambda *args: next(statuses))
+    monkeypatch.setattr(os, "tcgetpgrp", lambda fd: next(foreground_groups))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signals.append((pgid, sig)))
+    monkeypatch.setattr(
+        magy.profiles,
+        "_set_terminal_foreground_pgrp",
+        lambda fd, pgid: foreground_changes.append((fd, pgid)),
+    )
+
+    result = magy.profiles._wait_interactive_child(
+        FakeProcess(), timeout=1.0, tty_fd=9, parent_pgrp=1234
+    )
+
+    assert result == 0
+    assert foreground_changes == [(9, 1234)]
+    assert (4321, signal.SIGCONT) in signals

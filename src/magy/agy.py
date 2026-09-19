@@ -431,7 +431,7 @@ def sanitize_reason(raw: str) -> str:
 
     s = first_line
 
-    # 1. Redact Authorization header with any scheme (Bearer, Basic, Digest, etc.)
+    # 1. Redact the complete Authorization header, including compound schemes.
     def _redact_auth_header(m: re.Match) -> str:
         scheme = m.group(1)
         if scheme:
@@ -439,7 +439,8 @@ def sanitize_reason(raw: str) -> str:
         return "Authorization: [REDACTED]"
 
     s = re.sub(
-        r"(?i)\bauthorization\s*:\s*([A-Za-z0-9_-]+\s+)?[^\s,;]+",
+        r"(?i)\bauthorization\s*:\s*"
+        r"(?:(bearer|basic|digest|aws4-hmac-sha256)\s+)?[^\r\n]*$",
         _redact_auth_header,
         s,
     )
@@ -464,7 +465,7 @@ def sanitize_reason(raw: str) -> str:
         r"(?:[A-Za-z0-9_-]+[_-])?"
         r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret[_-]?access[_-]?key|"
         r"secret[_-]?key|client[_-]?secret|client[_-]?id|auth(?:[_-]?token)?|"
-        r"password|passwd|apiKey|token)"
+        r"authorization|credential|signature|password|passwd|apiKey|token)"
     )
     # JSON quoted key/value
     s = re.sub(
@@ -477,15 +478,21 @@ def sanitize_reason(raw: str) -> str:
         r'"\1": [REDACTED]',
         s,
     )
+    # Python-style quoted key/value
+    s = re.sub(
+        rf"""(?i)'({cred_names})'\s*:\s*(?:'[^']*'|"[^"]*")""",
+        r"'\1': '[REDACTED]'",
+        s,
+    )
     # Key-value pairs
     s = re.sub(
-        rf'(?i)\b({cred_names})\s*[=:]\s*(["\']?)[^\s,"\']+\2',
+        rf"""(?i)\b(?!authorization\s*:)({cred_names})\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
         r"\1=[REDACTED]",
         s,
     )
     # CLI options
     s = re.sub(
-        r'(?i)(--?[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|auth)[A-Za-z0-9_-]*)(?:\s*=\s*|\s+)(["\']?)[^\s,"\']+\2',
+        r"""(?i)(--?[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|auth)[A-Za-z0-9_-]*)(?:\s*=\s*|\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
         r"\1=[REDACTED]",
         s,
     )
@@ -625,11 +632,9 @@ def classify_run_health(
                 if c.health == cat_name:
                     return c
 
-    # Unknown failure
-    raw_err = bounded_stderr or bounded_stdout or bounded_log
-    sanitized = sanitize_reason(raw_err)
-    if not sanitized or sanitized == "Unknown failure":
-        sanitized = f"Command failed with exit code {exit_code}"
+    # Unknown provider text is not persisted because it can contain undocumented
+    # credential formats. Detailed diagnostics remain in the private run log.
+    sanitized = f"Command failed with exit code {exit_code}"
     return HealthClassification(
         health="unknown-failure",
         cooldown_seconds=config.cooldown_unknown,

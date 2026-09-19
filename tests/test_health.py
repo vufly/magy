@@ -69,7 +69,7 @@ def test_classify_unknown_failure():
     res = classify_run_health(1, stderr="Some unexpected internal error occurred.")
     assert res.health == "unknown-failure"
     assert res.cooldown_seconds == 15.0
-    assert "Some unexpected internal error" in (res.reason or "")
+    assert res.reason == "Command failed with exit code 1"
 
 
 def test_latest_signal_precedence():
@@ -157,6 +157,29 @@ def test_sanitize_reason_redaction():
     assert "sk-ant-999" not in san8
     assert '"OPENAI_API_KEY": "[REDACTED]"' in san8
     assert '"ANTHROPIC_API_KEY": "[REDACTED]"' in san8
+
+    sigv4 = sanitize_reason(
+        "Authorization: AWS4-HMAC-SHA256 Credential=AKIAFAKE, "
+        "SignedHeaders=host, Signature=fakesignature"
+    )
+    assert "AKIAFAKE" not in sigv4
+    assert "fakesignature" not in sigv4
+
+    bare_authorization = sanitize_reason("Authorization: AKIAFAKE")
+    assert "AKIAFAKE" not in bare_authorization
+
+    provider_auth = sanitize_reason(
+        "ANTHROPIC_AUTHORIZATION=fake-provider-authorization"
+    )
+    assert "fake-provider-authorization" not in provider_auth
+
+    quoted_spaces = sanitize_reason('OPENAI_API_KEY="fake key with spaces"')
+    assert "fake key with spaces" not in quoted_spaces
+
+    python_mapping = sanitize_reason(
+        "Payload: {'access_token': 'fake-python-mapping-secret'}"
+    )
+    assert "fake-python-mapping-secret" not in python_mapping
 
 
 def test_read_bounded_log_tail(tmp_path: Path):

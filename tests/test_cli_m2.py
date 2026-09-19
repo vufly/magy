@@ -3,7 +3,12 @@ import json
 import pytest
 
 from magy.cli import main
-from magy.profiles import get_profile, update_profile_health
+from magy.profiles import (
+    add_profile,
+    get_profile,
+    remove_profile,
+    update_profile_health,
+)
 
 
 def test_cli_profile_add_and_list(capfd):
@@ -199,3 +204,66 @@ def test_cli_auth_and_run_unregistered_rejected(capsys):
     err_run = capsys.readouterr().err
     assert "not registered" in err_run
     assert not get_profile_home_dir("nonexistent-run-p").exists()
+
+
+def test_passthrough_handles_profile_removed_after_selection(
+    fake_agy, monkeypatch, capsys
+):
+    import magy.routing
+
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    add_profile("selection-race-p", kind="managed")
+
+    def _select_then_remove(*args, **kwargs):
+        selected = get_profile("selection-race-p")
+        remove_profile("selection-race-p")
+        return selected
+
+    monkeypatch.setattr(magy.routing, "select_profile", _select_then_remove)
+
+    assert main(["--profile", "selection-race-p", "--", "models"]) == 1
+    assert "not registered" in capsys.readouterr().err
+
+
+def test_passthrough_rejects_profile_recreated_after_selection(
+    fake_agy, monkeypatch, capsys
+):
+    import magy.routing
+
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    add_profile("selection-aba-p", kind="managed")
+
+    def _select_then_recreate(*args, **kwargs):
+        selected = get_profile("selection-aba-p")
+        remove_profile("selection-aba-p")
+        add_profile("selection-aba-p", kind="managed")
+        return selected
+
+    monkeypatch.setattr(magy.routing, "select_profile", _select_then_recreate)
+
+    assert main(["--profile", "selection-aba-p", "--", "models"]) == 1
+    assert "removed or recreated after selection" in capsys.readouterr().err
+
+
+def test_passthrough_handles_selection_keyerror(monkeypatch, capsys):
+    import magy.routing
+
+    def _removed_during_selection(*args, **kwargs):
+        raise KeyError("removed during selection")
+
+    monkeypatch.setattr(magy.routing, "select_profile", _removed_during_selection)
+
+    assert main(["models"]) == 1
+    assert "removed during selection" in capsys.readouterr().err
+
+
+def test_profile_create_handles_pending_removal_cleanup(monkeypatch, capsys):
+    import magy.profiles
+
+    def _pending_cleanup(*args, **kwargs):
+        raise RuntimeError("pending removal cleanup")
+
+    monkeypatch.setattr(magy.profiles, "add_profile", _pending_cleanup)
+
+    assert main(["profile", "create", "pending-p"]) == 1
+    assert "pending removal cleanup" in capsys.readouterr().err

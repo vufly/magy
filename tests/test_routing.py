@@ -244,14 +244,36 @@ def test_select_profile_retries_on_concurrent_removal(monkeypatch):
     original_record = magy.routing.record_profile_selection
     first_call = True
 
-    def _flaky_record(name: str, selected_at: float | None = None):
+    def _flaky_record(
+        name: str,
+        selected_at: float | None = None,
+        expected_incarnation_id: str | None = None,
+    ):
         nonlocal first_call
         if first_call and name == "retry-p1":
             first_call = False
             raise KeyError(f"Profile '{name}' does not exist")
-        return original_record(name, selected_at)
+        return original_record(name, selected_at, expected_incarnation_id)
 
     monkeypatch.setattr("magy.routing.record_profile_selection", _flaky_record)
 
     sel = select_profile(now=1000.0)
     assert sel.name == "retry-p2"
+
+
+def test_record_profile_selection_rejects_recreated_incarnation():
+    from magy.profiles import get_profile, record_profile_selection, remove_profile
+
+    add_profile("selection-incarnation-p", kind="managed")
+    original = get_profile("selection-incarnation-p")
+    assert original is not None
+
+    remove_profile("selection-incarnation-p")
+    add_profile("selection-incarnation-p", kind="managed")
+
+    with pytest.raises(ValueError, match="recreated during selection"):
+        record_profile_selection(
+            "selection-incarnation-p",
+            1000.0,
+            expected_incarnation_id=original.incarnation_id,
+        )

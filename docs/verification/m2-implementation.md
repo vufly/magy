@@ -149,6 +149,21 @@ and transparent Agy passthrough.
   - Atomic replacement via temporary files (`0o600`, `O_EXCL`) in target directory descriptor with `os.rename(..., src_dir_fd=..., dst_dir_fd=...)`.
   - Added `test_sync_profile_settings_detects_symlink_component_during_traversal`.
 
+### Final Independent Review Remediation
+
+- Added foreground-aware process-group handoff, shell pipeline/background safeguards,
+  stop/resume job-control handling, and per-run descendant discovery.
+- Added double-forked `setsid()` cleanup while preserving concurrent profile runs.
+- Anchored POSIX synchronization roots and lock files component-by-component and
+  rejected all unsafe destination symlinks.
+- Restored Python 3.11/3.12 secure-sync compatibility through `os.stat(...,
+  follow_symlinks=False)`.
+- Replaced persisted free-form provider errors with controlled reasons and migrated
+  legacy values.
+- Added retryable removal tombstones, private-log cleanup, and recreation blocking
+  while cleanup remains pending.
+- Added incarnation verification during selection and launch.
+
 ## 2. Test Verification
 
 | Test Suite | Result | Details |
@@ -168,8 +183,7 @@ and transparent Agy passthrough.
 
 - `uv run ruff check .`: PASS (0 errors across whole repository).
 - `uv run ruff format --check .`: PASS (46 files formatted).
-- `uv run pytest`: 208 passed on Linux (Python 3.14.7).
+- `uv run pytest`: 222 passed on Linux (Python 3.14.7).
 - `uv run --python 3.11 ruff check .`: PASS.
-- `uv run --python 3.11 pytest`: 208 passed on Linux (Python 3.11.16).
+- `uv run --python 3.11 pytest`: 222 passed on Linux (Python 3.11.16).
 - `uv build`: PASS (built wheel and tarball).
-

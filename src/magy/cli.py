@@ -251,7 +251,13 @@ def handle_profile_command(
                 add_profile(args.name, kind=kind)
                 print(f"Added {kind} profile '{args.name}'")
             return 0
-        except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+        except (
+            RuntimeError,
+            ValueError,
+            FileNotFoundError,
+            PermissionError,
+            OSError,
+        ) as e:
             print(f"magy: error: {e}", file=sys.stderr)
             return 1
 
@@ -269,7 +275,14 @@ def handle_profile_command(
                 file=sys.stderr,
             )
             return 124
-        except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
+        except (
+            RuntimeError,
+            ValueError,
+            KeyError,
+            FileNotFoundError,
+            PermissionError,
+            OSError,
+        ) as e:
             print(f"magy: error: {e}", file=sys.stderr)
             return 1
 
@@ -489,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         selected = select_profile(explicit_name=target_profile)
-    except (ValueError, NoAvailableProfileError) as e:
+    except (KeyError, ValueError, NoAvailableProfileError) as e:
         print(f"magy: error: {e}", file=sys.stderr)
         return 1
 
@@ -504,6 +517,7 @@ def main(argv: list[str] | None = None) -> int:
             inject_log_file=True,
             sync_settings=True,
             update_health=True,
+            expected_incarnation_id=selected.incarnation_id,
         )
     except subprocess.TimeoutExpired as e:
         print(
@@ -511,7 +525,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 124
-    except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+    except (
+        KeyError,
+        RuntimeError,
+        ValueError,
+        FileNotFoundError,
+        PermissionError,
+        OSError,
+    ) as e:
         print(f"magy: error: {e}", file=sys.stderr)
         return 1
 

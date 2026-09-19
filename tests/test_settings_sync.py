@@ -145,11 +145,34 @@ def test_sync_rejects_destination_symlink_to_token(tmp_path: Path):
     real_gemini.mkdir()
     (real_gemini / "settings.json").write_text('{"theme": "light"}', encoding="utf-8")
 
-    # Perform settings sync
-    sync_profile_settings("dest-symlink-p", real_gemini_dir=real_gemini)
+    with pytest.raises(ValueError, match="Unsafe destination symlink"):
+        sync_profile_settings("dest-symlink-p", real_gemini_dir=real_gemini)
 
     # Token must NOT be overwritten!
     assert token_file.read_text(encoding="utf-8") == "CRITICAL_OAUTH_TOKEN"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
+def test_sync_rejects_nested_destination_directory_symlink(tmp_path: Path):
+    real_gemini = tmp_path / "real_gemini"
+    source_dir = real_gemini / "commands" / "nested"
+    source_dir.mkdir(parents=True)
+    (source_dir / "safe.txt").write_text("safe", encoding="utf-8")
+
+    external = tmp_path / "external"
+    external.mkdir()
+
+    add_profile("nested-dest-link-p", kind="managed")
+    target_commands = (
+        get_profile_home_dir("nested-dest-link-p") / ".gemini" / "commands"
+    )
+    target_commands.mkdir()
+    (target_commands / "nested").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="Unsafe destination path component"):
+        sync_profile_settings("nested-dest-link-p", real_gemini_dir=real_gemini)
+
+    assert not (external / "safe.txt").exists()
 
 
 def test_sync_prunes_denied_nested_directory_components(tmp_path: Path):
@@ -309,6 +332,74 @@ def test_sync_profile_settings_detects_symlink_component_during_traversal(
     target_gemini = get_profile_home_dir("traversal-sec-p") / ".gemini"
     assert not (target_gemini / "config" / "evil_link").exists()
     assert not (target_gemini / "config" / "secret.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="dir_fd and symlink tests for POSIX")
+def test_sync_profile_settings_fails_closed_when_source_root_changes(
+    tmp_path: Path, monkeypatch
+):
+    import magy.profiles
+
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    (real_gemini / "settings.json").write_text("SAFE", encoding="utf-8")
+
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "settings.json").write_text("EXTERNAL_SECRET", encoding="utf-8")
+
+    add_profile("root-race-p", kind="managed")
+    original_open = os.open
+    swapped = False
+
+    def _racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if (
+            not swapped
+            and str(path) == real_gemini.name
+            and kwargs.get("dir_fd") is not None
+            and flags & getattr(os, "O_DIRECTORY", 0)
+        ):
+            swapped = True
+            real_gemini.rename(tmp_path / "original_gemini")
+            real_gemini.symlink_to(external, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(magy.profiles.os, "open", _racing_open)
+    monkeypatch.setattr(
+        magy.profiles.os,
+        "supports_dir_fd",
+        set(os.supports_dir_fd) | {_racing_open},
+    )
+
+    with pytest.raises(ValueError, match="roots changed"):
+        sync_profile_settings("root-race-p", real_gemini_dir=real_gemini)
+
+    target = get_profile_home_dir("root-race-p") / ".gemini" / "settings.json"
+    assert swapped
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="dir_fd and symlink tests for POSIX")
+def test_sync_profile_settings_rejects_symlinked_destination_config(tmp_path: Path):
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+
+    external = tmp_path / "external"
+    external.mkdir()
+    skills_target = tmp_path / "skills_target"
+    skills_target.mkdir()
+    external_skills = external / "skills"
+    external_skills.symlink_to(skills_target, target_is_directory=True)
+
+    add_profile("dest-config-link-p", kind="managed")
+    target_gemini = get_profile_home_dir("dest-config-link-p") / ".gemini"
+    (target_gemini / "config").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="unsafe path component"):
+        sync_profile_settings("dest-config-link-p", real_gemini_dir=real_gemini)
+
+    assert external_skills.is_symlink()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")

@@ -60,7 +60,11 @@ def select_profile(
                 f"state ({profile.cooldown_reason or 'cooldown'})\n"
             )
             sys.stderr.flush()
-        return record_profile_selection(explicit_name, now)
+        return record_profile_selection(
+            explicit_name,
+            now,
+            expected_incarnation_id=profile.incarnation_id,
+        )
 
     routing_path = get_routing_file_path()
     lock = get_lock(routing_path, timeout=5.0)
@@ -123,7 +127,11 @@ def select_profile(
             atomic_write_json(routing_path, routing_state, lock=False)
 
         try:
-            return record_profile_selection(selected_name, now)
+            return record_profile_selection(
+                selected_name,
+                now,
+                expected_incarnation_id=profiles[selected_name].incarnation_id,
+            )
         except (KeyError, ValueError):
             if attempt == max_retries - 1:
                 raise

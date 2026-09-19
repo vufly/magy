@@ -1,6 +1,7 @@
 import fnmatch
 import ntpath
 import os
+import re
 import shutil
 import signal
 import stat
@@ -108,8 +109,31 @@ PROTECTED_ENV_VARS = frozenset(
         "MAGY_REAL_HOME",
         "AGY_CLI_DISABLE_AUTO_UPDATE",
         "MAGY_PROFILE",
+        "MAGY_RUN_ID",
     }
 )
+
+CONTROLLED_FAILURE_REASONS = frozenset(
+    {
+        "Authentication required",
+        "Quota exhausted",
+        "Request timed out",
+        "Command timed out",
+        "Rate limit exceeded",
+        "Failure details removed during security migration",
+    }
+)
+
+
+def _persistable_failure_reason(reason: str) -> str:
+    if reason in CONTROLLED_FAILURE_REASONS:
+        return reason
+    if re.fullmatch(r"Rate limit reached \(retry in [0-9]+s\)", reason):
+        return reason
+    if re.fullmatch(r"Command failed with exit code -?[0-9]+", reason):
+        return reason
+    return "Failure details removed during security migration"
+
 
 ALLOWLISTED_SETTINGS_FILES = (
     "AGENTS.md",
@@ -262,25 +286,38 @@ def get_registry_file_path() -> Path:
 
 
 def load_profiles() -> dict[str, ProfileMetadata]:
-    """Load all registered profiles, migrating missing incarnation IDs."""
+    """Load profiles, migrating IDs and sanitizing persisted failure reasons."""
     path = get_registry_file_path()
     data = read_json(path, lock=True, default={})
     profiles_dict = data.get("profiles", {})
-    missing = [
-        k
-        for k, v in profiles_dict.items()
-        if isinstance(v, dict) and not v.get("incarnation_id")
-    ]
-    if missing:
+    needs_migration = any(
+        isinstance(value, dict)
+        and (
+            not value.get("incarnation_id")
+            or (
+                value.get("cooldown_reason")
+                and _persistable_failure_reason(value["cooldown_reason"])
+                != value["cooldown_reason"]
+            )
+        )
+        for value in profiles_dict.values()
+    )
+    if needs_migration:
 
         def _migrate(reg: Any) -> Any:
             if not isinstance(reg, dict):
                 return reg
             profs = reg.get("profiles", {})
-            for m in missing:
-                if m in profs and isinstance(profs[m], dict):
-                    if not profs[m].get("incarnation_id"):
-                        profs[m]["incarnation_id"] = uuid.uuid4().hex
+            for profile_data in profs.values():
+                if not isinstance(profile_data, dict):
+                    continue
+                if not profile_data.get("incarnation_id"):
+                    profile_data["incarnation_id"] = uuid.uuid4().hex
+                reason = profile_data.get("cooldown_reason")
+                if reason:
+                    profile_data["cooldown_reason"] = _persistable_failure_reason(
+                        reason
+                    )
             return reg
 
         data = update_json(path, _migrate, default={"version": 1, "profiles": {}})
@@ -399,6 +436,19 @@ def add_profile(
     path = get_registry_file_path()
 
     with acquire_profile_lease(validated, exclusive=True):
+        staged_dirs = list(get_profiles_dir().glob(f".deleting_{validated}_*"))
+        pending_state_dirs = [
+            get_state_dir() / "runs" / validated,
+            get_state_dir() / "logs" / validated,
+        ]
+        if staged_dirs or (
+            get_profile(validated) is None
+            and any(state_dir.exists() for state_dir in pending_state_dirs)
+        ):
+            raise RuntimeError(
+                f"Profile '{validated}' has pending removal cleanup; "
+                "run profile remove again before recreating it"
+            )
         if kind == "managed":
             ensure_profile_layout(validated)
             actual_home = str(get_profile_home_dir(validated))
@@ -444,11 +494,25 @@ def remove_profile(name: str, force: bool = False) -> None:
     """
     validated = validate_profile_name(name)
     path = get_registry_file_path()
+    state_dirs = [
+        get_state_dir() / "runs" / validated,
+        get_state_dir() / "logs" / validated,
+    ]
 
     with acquire_profile_lease(validated, exclusive=True):
         existing = get_profile(validated)
         if existing is None:
-            raise KeyError(f"Profile '{validated}' does not exist")
+            staged_dirs = list(get_profiles_dir().glob(f".deleting_{validated}_*"))
+            pending_state_dirs = [
+                state_dir for state_dir in state_dirs if state_dir.exists()
+            ]
+            if not staged_dirs and not pending_state_dirs:
+                raise KeyError(f"Profile '{validated}' does not exist")
+            for staged_dir in staged_dirs:
+                shutil.rmtree(staged_dir)
+            for state_dir in pending_state_dirs:
+                shutil.rmtree(state_dir)
+            return
 
         target_incarnation = existing.incarnation_id
 
@@ -497,16 +561,19 @@ def remove_profile(name: str, force: bool = False) -> None:
                 shutil.rmtree(deleting_dir)
             except OSError as e:
                 raise OSError(
-                    f"Failed to remove profile directory {deleting_dir}: {e}"
+                    f"Failed to remove staged profile directory {deleting_dir}: {e}; "
+                    "run profile remove again to retry cleanup"
                 ) from e
 
-        # Clean up runs directory
-        run_dir = get_state_dir() / "runs" / validated
-        if run_dir.exists():
-            try:
-                shutil.rmtree(run_dir)
-            except OSError:
-                pass
+        for state_dir in state_dirs:
+            if state_dir.exists():
+                try:
+                    shutil.rmtree(state_dir)
+                except OSError as e:
+                    raise OSError(
+                        f"Failed to remove profile state {state_dir}: {e}; "
+                        "run profile remove again to retry cleanup"
+                    ) from e
 
 
 def enable_profile(name: str) -> ProfileMetadata:
@@ -593,8 +660,6 @@ def update_profile_health(
     validated = validate_profile_name(name)
     path = get_registry_file_path()
 
-    from magy.agy import sanitize_reason
-
     def _update(data: Any) -> Any:
         profiles = data.get("profiles", {})
         if validated not in profiles:
@@ -613,7 +678,9 @@ def update_profile_health(
                 meta.cooldown_until = now + cooldown_seconds
             else:
                 meta.cooldown_until = None
-            meta.cooldown_reason = sanitize_reason(reason) if reason else None
+            meta.cooldown_reason = (
+                _persistable_failure_reason(reason) if reason else None
+            )
 
         profiles[validated] = meta.to_dict()
         return data
@@ -623,7 +690,9 @@ def update_profile_health(
 
 
 def record_profile_selection(
-    name: str, selected_at: float | None = None
+    name: str,
+    selected_at: float | None = None,
+    expected_incarnation_id: str | None = None,
 ) -> ProfileMetadata:
     """Record that a profile was selected for execution."""
     validated = validate_profile_name(name)
@@ -635,6 +704,13 @@ def record_profile_selection(
         if validated not in profiles:
             raise KeyError(f"Profile '{validated}' does not exist")
         meta = ProfileMetadata.from_dict(profiles[validated])
+        if (
+            expected_incarnation_id is not None
+            and meta.incarnation_id != expected_incarnation_id
+        ):
+            raise ValueError(
+                f"Profile '{validated}' was removed or recreated during selection"
+            )
         meta.last_selected_at = max(now, meta.last_selected_at or 0.0)
         profiles[validated] = meta.to_dict()
         return data
@@ -686,14 +762,6 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
     if not real_gemini_dir.exists():
         return []
 
-    ensure_private_directory(target_gemini)
-
-    try:
-        real_gemini_dir.resolve()
-        target_gemini_resolved = target_gemini.resolve()
-    except OSError:
-        return []
-
     copied_files: list[Path] = []
 
     def _is_component_denied(part: str) -> bool:
@@ -706,6 +774,10 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
     supports_dir_fd = (
         hasattr(os, "supports_dir_fd")
         and os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.mkdir in os.supports_dir_fd
+        and os.rename in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
         and getattr(os, "O_NOFOLLOW", None) is not None
     )
 
@@ -797,13 +869,17 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
                 target_parent_dfd = _open_descendant_dir_fd(
                     target_root_dfd, dir_parts, create=True
                 )
-            except OSError:
-                return
+            except OSError as e:
+                raise ValueError(
+                    f"Unsafe destination path component: {rel_path.parent}"
+                ) from e
 
             try:
-                st_dst = os.lstat(filename, dir_fd=target_parent_dfd)
+                st_dst = os.stat(
+                    filename, dir_fd=target_parent_dfd, follow_symlinks=False
+                )
                 if stat.S_ISLNK(st_dst.st_mode):
-                    return
+                    raise ValueError(f"Unsafe destination symlink: {rel_path}")
             except FileNotFoundError:
                 pass
 
@@ -856,157 +932,165 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
                 except OSError:
                     pass
 
-    def _safe_copy_file_path(src: Path, rel_path: Path) -> None:
-        if _is_rel_path_denied(rel_path):
-            return
+    def _iter_safe_source_files():
+        for rel_str in ALLOWLISTED_SETTINGS_FILES:
+            rel_path = Path(rel_str)
+            src_path = real_gemini_dir / rel_path
+            if src_path.exists() and src_path.is_file():
+                yield src_path, rel_path
 
-        if src.is_symlink() or os.path.islink(src):
-            return
+        for rel_dir_str in ALLOWLISTED_SETTINGS_DIRS:
+            src_dir = real_gemini_dir / rel_dir_str
+            if not src_dir.is_dir() or src_dir.is_symlink():
+                continue
+            for root, dirs, files in os.walk(src_dir, followlinks=False):
+                valid_dirs = []
+                for dirname in dirs:
+                    dir_path = Path(root) / dirname
+                    rel_dir = dir_path.relative_to(real_gemini_dir)
+                    if dir_path.is_symlink() or _is_rel_path_denied(rel_dir):
+                        continue
+                    valid_dirs.append(dirname)
+                dirs[:] = valid_dirs
+                for filename in files:
+                    src_path = Path(root) / filename
+                    rel_path = src_path.relative_to(real_gemini_dir)
+                    if not src_path.is_symlink() and not _is_rel_path_denied(rel_path):
+                        yield src_path, rel_path
 
-        dest = target_gemini / rel_path
-        curr = target_gemini
-        for part in rel_path.parts[:-1]:
-            curr = curr / part
-            if curr.is_symlink() or os.path.islink(curr):
-                return
-            if curr.exists():
-                try:
-                    curr_resolved = curr.resolve()
-                    if not (
-                        curr_resolved == target_gemini_resolved
-                        or curr_resolved.is_relative_to(target_gemini_resolved)
-                    ):
-                        return
-                except OSError:
-                    return
-            else:
-                try:
-                    parent_res = curr.parent.resolve()
-                    if not (
-                        parent_res == target_gemini_resolved
-                        or parent_res.is_relative_to(target_gemini_resolved)
-                    ):
-                        return
-                except OSError:
-                    return
-                ensure_private_directory(curr)
+    if not supports_dir_fd:
+        if os.name != "nt":
+            raise RuntimeError(
+                "Secure settings synchronization is not supported on this platform"
+            )
 
-        if dest.is_symlink() or os.path.islink(dest):
-            return
-        if dest.exists():
-            try:
-                dest_res = dest.resolve()
-                if not (
-                    dest_res == target_gemini_resolved
-                    or dest_res.is_relative_to(target_gemini_resolved)
-                ):
-                    return
-            except OSError:
-                return
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
-        ensure_private_directory(dest.parent)
+        def _assert_windows_path_safe(path: Path) -> None:
+            current = Path(path.anchor)
+            for part in path.parts[1:]:
+                current /= part
+                if not current.exists() and not current.is_symlink():
+                    continue
+                info = current.lstat()
+                attrs = getattr(info, "st_file_attributes", 0)
+                if stat.S_ISLNK(info.st_mode) or attrs & reparse_flag:
+                    raise ValueError(
+                        f"Unsafe reparse point in settings path: {current}"
+                    )
 
-        tmp_name = f".tmp_sync_{uuid.uuid4().hex}"
-        tmp_file = dest.parent / tmp_name
-        try:
-            content = src.read_bytes()
-            fd = os.open(str(tmp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(content)
-            ensure_private_file(tmp_file)
-            os.replace(tmp_file, dest)
-            copied_files.append(dest)
-        except OSError:
-            if tmp_file.exists():
-                try:
-                    tmp_file.unlink()
-                except OSError:
-                    pass
+        with get_lock(p_dir / ".sync"):
+            validate_profile_layout(name)
+            _assert_windows_path_safe(real_gemini_dir)
+            _assert_windows_path_safe(target_gemini)
 
-    sync_lock = get_lock(p_dir / ".sync")
-    with sync_lock:
-        validate_profile_layout(name)
-
-        # Ensure any pre-existing symlink at config/skills is cleaned up
-        skills_dest = target_gemini / "config" / "skills"
-        if skills_dest.is_symlink() or os.path.islink(skills_dest):
-            try:
+            skills_dest = target_gemini / "config" / "skills"
+            if skills_dest.is_symlink():
                 skills_dest.unlink()
-            except OSError:
-                pass
 
-        src_root_dfd = None
-        target_root_dfd = None
-        if supports_dir_fd:
-            try:
-                src_root_dfd = os.open(
-                    str(real_gemini_dir),
-                    os.O_RDONLY
-                    | getattr(os, "O_DIRECTORY", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                )
-                target_root_dfd = os.open(
-                    str(target_gemini),
-                    os.O_RDONLY
-                    | getattr(os, "O_DIRECTORY", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                )
-            except OSError:
-                src_root_dfd = None
-                target_root_dfd = None
+            for src_path, rel_path in _iter_safe_source_files():
+                _assert_windows_path_safe(src_path)
+                dest = target_gemini / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                _assert_windows_path_safe(dest.parent)
+                if dest.is_symlink():
+                    raise ValueError(f"Unsafe destination symlink: {dest}")
+                tmp_file = dest.with_name(f".tmp_sync_{uuid.uuid4().hex}")
+                try:
+                    content = src_path.read_bytes()
+                    fd = os.open(
+                        tmp_file,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_BINARY,
+                        0o600,
+                    )
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(content)
+                    os.replace(tmp_file, dest)
+                    copied_files.append(dest)
+                finally:
+                    tmp_file.unlink(missing_ok=True)
+        return copied_files
 
-        def _do_copy(src_p: Path, rel_p: Path) -> None:
-            if src_root_dfd is not None and target_root_dfd is not None:
-                _safe_copy_file_fd(src_root_dfd, target_root_dfd, rel_p)
-            else:
-                _safe_copy_file_path(src_p, rel_p)
+    root_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
 
+    def _open_absolute_dir_fd(path: Path) -> int:
+        absolute = path.absolute()
+        current_fd = os.open(absolute.anchor, root_flags)
         try:
-            # 1. Sync allowlisted files
-            for rel_str in ALLOWLISTED_SETTINGS_FILES:
-                rel_path = Path(rel_str)
-                src_path = real_gemini_dir / rel_path
-                if src_path.exists() and src_path.is_file():
-                    _do_copy(src_path, rel_path)
+            for part in absolute.parts[1:]:
+                next_fd = os.open(part, root_flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except Exception:
+            os.close(current_fd)
+            raise
 
-            # 2. Sync allowlisted directories
-            for rel_dir_str in ALLOWLISTED_SETTINGS_DIRS:
-                rel_dir = Path(rel_dir_str)
-                src_dir = real_gemini_dir / rel_dir
-                if (
-                    src_dir.exists()
-                    and src_dir.is_dir()
-                    and not (src_dir.is_symlink() or os.path.islink(src_dir))
-                ):
-                    for root, dirs, files in os.walk(src_dir, followlinks=False):
-                        valid_dirs = []
-                        for d in dirs:
-                            d_path = Path(root) / d
-                            if d_path.is_symlink() or os.path.islink(d_path):
-                                continue
-                            rel_d = d_path.relative_to(real_gemini_dir)
-                            if _is_rel_path_denied(rel_d):
-                                continue
-                            valid_dirs.append(d)
-                        dirs[:] = valid_dirs
+    p_dir_dfd = None
+    sync_fd = None
+    src_root_dfd = None
+    target_root_dfd = None
+    try:
+        p_dir_dfd = _open_absolute_dir_fd(p_dir)
+        sync_fd = os.open(
+            ".sync.lock",
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=p_dir_dfd,
+        )
+        _lock_fd(sync_fd, exclusive=True, blocking=True)
+        validate_profile_layout(name)
+        src_root_dfd = _open_absolute_dir_fd(real_gemini_dir)
+        target_root_dfd = _open_absolute_dir_fd(target_gemini)
 
-                        for f in files:
-                            f_path = Path(root) / f
-                            if f_path.is_symlink() or os.path.islink(f_path):
-                                continue
-                            rel_f = f_path.relative_to(real_gemini_dir)
-                            _do_copy(f_path, rel_f)
+        config_dfd = None
+        try:
+            config_dfd = _open_descendant_dir_fd(
+                target_root_dfd, ("config",), create=True
+            )
+            try:
+                skills_stat = os.stat(
+                    "skills", dir_fd=config_dfd, follow_symlinks=False
+                )
+            except FileNotFoundError:
+                skills_stat = None
+            if skills_stat is not None and stat.S_ISLNK(skills_stat.st_mode):
+                try:
+                    os.unlink("skills", dir_fd=config_dfd)
+                except OSError as e:
+                    raise ValueError(
+                        "Unsafe destination config/skills symlink could not be removed"
+                    ) from e
+            elif skills_stat is not None and not stat.S_ISDIR(skills_stat.st_mode):
+                raise ValueError("Destination config/skills must be a directory")
+        except OSError as e:
+            raise ValueError(
+                "Destination config directory contains an unsafe path component"
+            ) from e
         finally:
-            if target_root_dfd is not None:
-                try:
-                    os.close(target_root_dfd)
-                except OSError:
-                    pass
-            if src_root_dfd is not None:
-                try:
-                    os.close(src_root_dfd)
-                except OSError:
-                    pass
+            if config_dfd is not None:
+                os.close(config_dfd)
+
+        for _src_path, rel_path in _iter_safe_source_files():
+            _safe_copy_file_fd(src_root_dfd, target_root_dfd, rel_path)
+    except OSError as e:
+        raise ValueError(
+            "Settings synchronization roots changed or contain symlinks"
+        ) from e
+    finally:
+        if target_root_dfd is not None:
+            os.close(target_root_dfd)
+        if src_root_dfd is not None:
+            os.close(src_root_dfd)
+        if sync_fd is not None:
+            try:
+                _unlock_fd(sync_fd)
+            finally:
+                os.close(sync_fd)
+        if p_dir_dfd is not None:
+            os.close(p_dir_dfd)
 
     return copied_files
 
@@ -1115,10 +1199,135 @@ def _is_pgrp_alive(pgid: int) -> bool:
         return True
 
 
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        fields = (
+            (Path("/proc") / str(pid) / "stat")
+            .read_text(encoding="utf-8")
+            .rsplit(")", 1)[1]
+            .split()
+        )
+        if fields[0] == "Z":
+            return False
+    except (OSError, IndexError):
+        pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+
+
+def _get_descendant_pids(root_pid: int) -> set[int]:
+    parent_by_pid: dict[int, int] = {}
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = (
+                    (entry / "stat")
+                    .read_text(encoding="utf-8")
+                    .rsplit(")", 1)[1]
+                    .split()
+                )
+                parent_by_pid[int(entry.name)] = int(fields[1])
+            except (OSError, ValueError, IndexError):
+                continue
+    else:
+        try:
+            result = subprocess.run(
+                ["ps", "-A", "-o", "pid=", "-o", "ppid="],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+            for line in result.stdout.splitlines():
+                pid_text, parent_text = line.split()
+                parent_by_pid[int(pid_text)] = int(parent_text)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return set()
+
+    descendants: set[int] = set()
+    frontier = {root_pid}
+    while frontier:
+        children = {
+            pid
+            for pid, parent in parent_by_pid.items()
+            if parent in frontier and pid not in descendants
+        }
+        descendants.update(children)
+        frontier = children
+    return descendants
+
+
+def _get_process_group_members(pgid: int) -> set[int]:
+    members: set[int] = set()
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = (
+                    (entry / "stat")
+                    .read_text(encoding="utf-8")
+                    .rsplit(")", 1)[1]
+                    .split()
+                )
+                if int(fields[2]) == pgid:
+                    members.add(int(entry.name))
+            except (OSError, ValueError, IndexError):
+                continue
+    return members
+
+
+def _get_run_marker_pids(run_id: str) -> set[int]:
+    marker = f"MAGY_RUN_ID={run_id}".encode()
+    matches: set[int] = set()
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return matches
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if marker in (entry / "environ").read_bytes().split(b"\0"):
+                matches.add(int(entry.name))
+        except (OSError, ValueError):
+            continue
+    return matches
+
+
+def _signal_pids(pids: set[int], signum: int) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signum)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def _set_terminal_foreground_pgrp(fd: int, pgid: int) -> None:
+    old_mask = None
+    try:
+        if hasattr(signal, "pthread_sigmask"):
+            old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+        os.tcsetpgrp(fd, pgid)
+    finally:
+        if old_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+
 def _kill_process_tree(
     proc: subprocess.Popen,
     grace: float = 1.0,
     is_pgrp: bool | None = None,
+    initial_signal: int = signal.SIGTERM,
+    run_id: str | None = None,
 ) -> None:
     """Terminate child process and all descendants, escalating to SIGKILL.
 
@@ -1128,6 +1337,9 @@ def _kill_process_tree(
     """
     pid = proc.pid
     if os.name != "nt":
+        descendants = _get_descendant_pids(pid)
+        if run_id is not None:
+            descendants.update(_get_run_marker_pids(run_id) - {pid, os.getpid()})
         if is_pgrp is None:
             try:
                 is_pgrp = os.getpgid(pid) == pid
@@ -1137,14 +1349,32 @@ def _kill_process_tree(
         if is_pgrp:
             # 1. Send SIGTERM to entire process group
             try:
-                os.killpg(pid, signal.SIGTERM)
+                os.killpg(pid, initial_signal)
             except (ProcessLookupError, OSError):
                 pass
+            _signal_pids(descendants, initial_signal)
 
             # 2. Wait up to grace seconds; do not exit early if descendants remain
             deadline = time.time() + grace
             while time.time() < deadline:
-                if not _is_pgrp_alive(pid):
+                proc.poll()
+                if run_id is not None:
+                    descendants.update(
+                        _get_run_marker_pids(run_id) - {pid, os.getpid()}
+                    )
+                descendants = {p for p in descendants if _is_pid_alive(p)}
+                roots = set(descendants)
+                if proc.returncode is None:
+                    roots.add(pid)
+                new_descendants = (
+                    set().union(*(_get_descendant_pids(root) for root in roots))
+                    - descendants
+                    if roots
+                    else set()
+                )
+                descendants.update(new_descendants)
+                _signal_pids(new_descendants, initial_signal)
+                if not _is_pgrp_alive(pid) and not descendants:
                     break
                 time.sleep(0.05)
 
@@ -1154,12 +1384,19 @@ def _kill_process_tree(
                     os.killpg(pid, signal.SIGKILL)
                 except (ProcessLookupError, OSError):
                     pass
+            _signal_pids(descendants, signal.SIGKILL)
 
-                kill_deadline = time.time() + 1.0
-                while time.time() < kill_deadline:
-                    if not _is_pgrp_alive(pid):
-                        break
-                    time.sleep(0.05)
+            kill_deadline = time.time() + 1.0
+            while time.time() < kill_deadline:
+                proc.poll()
+                if run_id is not None:
+                    descendants.update(
+                        _get_run_marker_pids(run_id) - {pid, os.getpid()}
+                    )
+                descendants = {p for p in descendants if _is_pid_alive(p)}
+                if not _is_pgrp_alive(pid) and not descendants:
+                    break
+                time.sleep(0.05)
 
             # 4. Reap direct child
             try:
@@ -1168,32 +1405,115 @@ def _kill_process_tree(
                 pass
             return
 
-        # Fallback for POSIX process not in its own process group
+        # A background shell job may share Magy's process group, so signal its
+        # recorded descendants individually instead of signaling that whole group.
         try:
-            proc.terminate()
+            proc.send_signal(initial_signal)
         except OSError:
             pass
-        try:
-            proc.wait(timeout=grace)
-        except (subprocess.TimeoutExpired, OSError):
+        _signal_pids(descendants, initial_signal)
+        deadline = time.time() + grace
+        while time.time() < deadline:
+            proc.poll()
+            if run_id is not None:
+                descendants.update(_get_run_marker_pids(run_id) - {pid, os.getpid()})
+            descendants = {p for p in descendants if _is_pid_alive(p)}
+            roots = set(descendants)
+            if proc.returncode is None:
+                roots.add(pid)
+            new_descendants = (
+                set().union(*(_get_descendant_pids(root) for root in roots))
+                - descendants
+                if roots
+                else set()
+            )
+            descendants.update(new_descendants)
+            _signal_pids(new_descendants, initial_signal)
+            if proc.returncode is not None and not descendants:
+                break
+            time.sleep(0.05)
+        if proc.poll() is None:
             try:
                 proc.kill()
-                proc.wait(timeout=1.0)
             except OSError:
                 pass
+        _signal_pids(descendants, signal.SIGKILL)
+        try:
+            proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
     else:
         try:
-            proc.terminate()
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=grace)
-        except (subprocess.TimeoutExpired, OSError):
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=grace + 1.0,
+                check=False,
+            )
+            if result.returncode != 0 and proc.poll() is None:
+                proc.kill()
+        except (OSError, subprocess.TimeoutExpired):
             try:
                 proc.kill()
-                proc.wait(timeout=1.0)
             except OSError:
                 pass
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"Failed to terminate process tree for PID {pid}") from e
+        except OSError:
+            pass
+
+
+def _find_controlling_tty() -> tuple[int | None, bool]:
+    for fd in (0, 1, 2):
+        try:
+            if os.isatty(fd):
+                os.tcgetpgrp(fd)
+                return fd, False
+        except OSError:
+            continue
+    try:
+        fd = os.open(
+            "/dev/tty",
+            os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+        )
+        os.tcgetpgrp(fd)
+        return fd, True
+    except OSError:
+        return None, False
+
+
+def _wait_interactive_child(
+    proc: subprocess.Popen,
+    timeout: float | None,
+    tty_fd: int,
+    parent_pgrp: int,
+) -> int:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        try:
+            waited_pid, status = os.waitpid(proc.pid, os.WUNTRACED | os.WNOHANG)
+        except ChildProcessError:
+            return proc.returncode if proc.returncode is not None else proc.poll() or 0
+
+        if waited_pid:
+            if os.WIFSTOPPED(status):
+                if os.tcgetpgrp(tty_fd) == proc.pid:
+                    _set_terminal_foreground_pgrp(tty_fd, parent_pgrp)
+                os.kill(os.getpid(), signal.SIGTSTP)
+                if os.tcgetpgrp(tty_fd) == parent_pgrp:
+                    _set_terminal_foreground_pgrp(tty_fd, proc.pid)
+                os.killpg(proc.pid, signal.SIGCONT)
+                continue
+            proc.returncode = os.waitstatus_to_exitcode(status)
+            return proc.returncode
+
+        if deadline is not None and time.monotonic() >= deadline:
+            assert timeout is not None
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        time.sleep(0.05)
 
 
 def run_in_profile(
@@ -1208,6 +1528,7 @@ def run_in_profile(
     sync_settings: bool = True,
     inject_log_file: bool = False,
     update_health: bool = False,
+    expected_incarnation_id: str | None = None,
 ) -> Any:
     """Run an Agy command within the profile's isolated environment."""
     validated = validate_profile_name(name)
@@ -1220,6 +1541,13 @@ def run_in_profile(
             raise ValueError(f"Profile '{validated}' is disabled")
         if not profile.incarnation_id:
             raise ValueError(f"Profile '{validated}' has invalid incarnation ID")
+        if (
+            expected_incarnation_id is not None
+            and profile.incarnation_id != expected_incarnation_id
+        ):
+            raise RuntimeError(
+                f"Profile '{validated}' was removed or recreated after selection"
+            )
 
         if profile.kind == "managed":
             validate_profile_layout(validated)
@@ -1271,6 +1599,7 @@ def run_in_profile(
             )
 
         run_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+        env["MAGY_RUN_ID"] = run_id
         injected_log_file: Path | None = None
         cmd_args = list(args)
         if (inject_log_file or update_health) and caller_log_file is None:
@@ -1292,7 +1621,24 @@ def run_in_profile(
 
         cmd = [str(executable), *cmd_args]
 
-        has_own_pgrp = (os.name != "nt") and capture_output
+        tty_fd: int | None = None
+        close_tty_fd = False
+        original_foreground_pgrp: int | None = None
+        parent_pgrp: int | None = None
+        can_handoff_terminal = False
+        if os.name != "nt" and not capture_output:
+            tty_fd, close_tty_fd = _find_controlling_tty()
+            if tty_fd is not None:
+                original_foreground_pgrp = os.tcgetpgrp(tty_fd)
+                parent_pgrp = os.getpgrp()
+                can_handoff_terminal = (
+                    original_foreground_pgrp == parent_pgrp
+                    and len(_get_process_group_members(parent_pgrp)) <= 1
+                )
+
+        has_own_pgrp = os.name != "nt" and (
+            capture_output or tty_fd is None or can_handoff_terminal
+        )
 
         popen_kwargs: dict[str, Any] = {
             "env": env,
@@ -1300,6 +1646,8 @@ def run_in_profile(
         }
         if has_own_pgrp:
             popen_kwargs["process_group"] = 0
+        elif os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
         if capture_output:
             popen_kwargs["stdout"] = subprocess.PIPE
@@ -1310,19 +1658,30 @@ def run_in_profile(
             popen_kwargs["stdout"] = None
             popen_kwargs["stderr"] = None
 
-        proc = subprocess.Popen(cmd, **popen_kwargs)
+        try:
+            proc: subprocess.Popen[Any] = subprocess.Popen(cmd, **popen_kwargs)
+        except Exception:
+            if close_tty_fd and tty_fd is not None:
+                os.close(tty_fd)
+            raise
+
+        terminal_handed_off = False
+        if has_own_pgrp and can_handoff_terminal and tty_fd is not None:
+            try:
+                _set_terminal_foreground_pgrp(tty_fd, proc.pid)
+                os.killpg(proc.pid, signal.SIGCONT)
+                terminal_handed_off = True
+            except OSError:
+                terminal_handed_off = False
 
         def _forward_signal(signum: int, frame: Any) -> None:
-            if has_own_pgrp:
-                try:
-                    os.killpg(proc.pid, signum)
-                except OSError:
-                    pass
-            else:
-                try:
-                    proc.send_signal(signum)
-                except OSError:
-                    pass
+            _kill_process_tree(
+                proc,
+                grace=1.0,
+                is_pgrp=has_own_pgrp,
+                initial_signal=signum,
+                run_id=run_id,
+            )
 
         old_sigint = None
         old_sigterm = None
@@ -1336,27 +1695,44 @@ def run_in_profile(
             pass
 
         timed_out = False
+        retcode: int
         try:
             if capture_output:
                 stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
                 stdout_text = (
                     stdout_bytes.decode("utf-8", errors="replace")
-                    if stdout_bytes
+                    if isinstance(stdout_bytes, bytes)
                     else ""
                 )
                 stderr_text = (
                     stderr_bytes.decode("utf-8", errors="replace")
-                    if stderr_bytes
+                    if isinstance(stderr_bytes, bytes)
                     else ""
                 )
+                if proc.returncode is None:
+                    raise RuntimeError("Child process exited without a return code")
                 retcode = proc.returncode
             else:
-                retcode = proc.wait(timeout=timeout)
+                if (
+                    terminal_handed_off
+                    and tty_fd is not None
+                    and parent_pgrp is not None
+                ):
+                    retcode = _wait_interactive_child(
+                        proc, timeout, tty_fd, parent_pgrp
+                    )
+                else:
+                    retcode = proc.wait(timeout=timeout)
                 stdout_text = ""
                 stderr_text = ""
         except subprocess.TimeoutExpired as exc:
             timed_out = True
-            _kill_process_tree(proc, grace=1.0, is_pgrp=has_own_pgrp)
+            _kill_process_tree(
+                proc,
+                grace=1.0,
+                is_pgrp=has_own_pgrp,
+                run_id=run_id,
+            )
             retcode = 124
             if update_health:
                 cfg = load_config()
@@ -1369,14 +1745,31 @@ def run_in_profile(
                 )
             raise exc
         finally:
+            if os.name != "nt" or proc.poll() is None:
+                _kill_process_tree(
+                    proc,
+                    grace=1.0,
+                    is_pgrp=has_own_pgrp,
+                    run_id=run_id,
+                )
+            if (
+                terminal_handed_off
+                and tty_fd is not None
+                and parent_pgrp is not None
+                and os.tcgetpgrp(tty_fd) == proc.pid
+            ):
+                try:
+                    _set_terminal_foreground_pgrp(tty_fd, parent_pgrp)
+                except OSError:
+                    pass
             if old_sigint is not None:
                 signal.signal(signal.SIGINT, old_sigint)
             if old_sigterm is not None:
                 signal.signal(signal.SIGTERM, old_sigterm)
-            if proc.poll() is None or (has_own_pgrp and _is_pgrp_alive(proc.pid)):
-                _kill_process_tree(proc, grace=1.0, is_pgrp=has_own_pgrp)
+            if close_tty_fd and tty_fd is not None:
+                os.close(tty_fd)
 
-        if retcode is not None and retcode < 0:
+        if retcode < 0:
             retcode = 128 + abs(retcode)
 
         if update_health and not timed_out:
