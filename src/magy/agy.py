@@ -231,6 +231,42 @@ def get_agy_version(executable: Path, timeout: float = 5.0) -> str | None:
     return None
 
 
+def get_agy_capabilities(
+    executable: Path | None, timeout: float = 5.0
+) -> dict[str, bool]:
+    """Inspect agy executable help output to detect supported capabilities.
+
+    Returns dict with keys:
+      - 'supports_json_output': True if --output-format is supported
+      - 'supports_auto_approval': True if --dangerously-skip-permissions is supported
+      - 'supports_add_dir': True if --add-dir is supported
+    """
+    default_caps = {
+        "supports_json_output": False,
+        "supports_auto_approval": False,
+        "supports_add_dir": False,
+    }
+    if executable is None:
+        return default_caps
+
+    try:
+        res = subprocess.run(
+            [str(executable), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        help_text = (res.stdout or "") + " " + (res.stderr or "")
+        return {
+            "supports_json_output": "--output-format" in help_text,
+            "supports_auto_approval": "--dangerously-skip-permissions" in help_text,
+            "supports_add_dir": "--add-dir" in help_text,
+        }
+    except (OSError, subprocess.TimeoutExpired):
+        return default_caps
+
+
 @dataclass
 class AgyDiagnostics:
     magy_version: str

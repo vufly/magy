@@ -129,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force removal without interactive confirmation.",
     )
 
+    worker_p = subparsers.add_parser("worker", help=argparse.SUPPRESS)
+    worker_p.add_argument("run_id", help="Run ID")
+
     return parser
 
 
@@ -439,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Subcommands
-    if argv[0] in ("doctor", "status", "profile"):
+    if argv[0] in ("doctor", "status", "profile", "worker"):
         args, remaining = parser.parse_known_args(argv)
         if args.subcommand == "doctor":
             if remaining:
@@ -451,6 +454,12 @@ def main(argv: list[str] | None = None) -> int:
             return run_status(args)
         elif args.subcommand == "profile":
             return handle_profile_command(args, remaining, parser)
+        elif args.subcommand == "worker":
+            if remaining:
+                parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
+            from magy.worker import run_worker
+
+            return run_worker(args.run_id)
 
     # Check for misplaced subcommands when no '--' was given
     if post_args is None:

@@ -113,6 +113,18 @@ def main() -> int:
         print(version)
         return 0
 
+    if "--help" in sys.argv or "-h" in sys.argv:
+        caps = os.environ.get("FAKE_AGY_CAPABILITIES", "json,auto_approval,add_dir")
+        lines = ["Usage of agy:"]
+        if "json" in caps:
+            lines.append("  --output-format Output format for print mode")
+        if "auto_approval" in caps:
+            lines.append("  --dangerously-skip-permissions Auto-approve permissions")
+        if "add_dir" in caps:
+            lines.append("  --add-dir Add a directory to the workspace")
+        print("\n".join(lines))
+        return 0
+
     # Handle interactive probe mode
     if mode == "interactive_probe" or "--interactive-probe" in sys.argv:
         tty_file = os.environ.get("FAKE_AGY_TTY_STATUS_FILE")
@@ -272,6 +284,16 @@ def main() -> int:
         return int(os.environ.get("FAKE_AGY_EXIT_CODE", "0"))
 
     # Default success response
+    if "--output-format" in sys.argv:
+        idx = sys.argv.index("--output-format")
+        if idx + 1 < len(sys.argv) and sys.argv[idx + 1] == "json":
+            print(json.dumps({"response": "Fake Agy: command executed successfully."}))
+            return 0
+    for a in sys.argv:
+        if a == "--output-format=json":
+            print(json.dumps({"response": "Fake Agy: command executed successfully."}))
+            return 0
+
     print("Fake Agy: command executed successfully.")
     return 0
 
