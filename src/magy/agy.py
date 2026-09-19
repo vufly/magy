@@ -459,15 +459,12 @@ def sanitize_reason(raw: str) -> str:
     # Redact URL query parameters
     s = re.sub(r"(\?[^\s#]*)", r"?[REDACTED_QUERY]", s)
 
-    # 3. Redact common credential keys including compound names
+    # 3. Redact common credential keys including provider prefixes and compound names
     cred_names = (
-        r"(?:(?:access[_-]?|refresh[_-]?)?token|"
-        r"client[_-]?secret|"
-        r"(?:x[_-])?api[_-]?key|"
-        r"apiKey|"
-        r"secret(?:[_-]?key)?|"
-        r"pass(?:word|wd)?|"
-        r"auth(?:[_-]?token)?)"
+        r"(?:[A-Za-z0-9_-]+[_-])?"
+        r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret[_-]?access[_-]?key|"
+        r"secret[_-]?key|client[_-]?secret|client[_-]?id|auth(?:[_-]?token)?|"
+        r"password|passwd|apiKey|token)"
     )
     # JSON quoted key/value
     s = re.sub(
@@ -475,9 +472,20 @@ def sanitize_reason(raw: str) -> str:
         r'"\1": "[REDACTED]"',
         s,
     )
+    s = re.sub(
+        rf'(?i)"({cred_names})"\s*:\s*([^",\s}}]+)',
+        r'"\1": [REDACTED]',
+        s,
+    )
     # Key-value pairs
     s = re.sub(
         rf'(?i)\b({cred_names})\s*[=:]\s*(["\']?)[^\s,"\']+\2',
+        r"\1=[REDACTED]",
+        s,
+    )
+    # CLI options
+    s = re.sub(
+        r'(?i)(--?[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|auth)[A-Za-z0-9_-]*)(?:\s*=\s*|\s+)(["\']?)[^\s,"\']+\2',
         r"\1=[REDACTED]",
         s,
     )

@@ -113,17 +113,53 @@ and transparent Agy passthrough.
   - Normalizes signal-derived exit codes to POSIX standard `128 + abs(signum)`.
 - Strictly parses Magy options before `--`, rejecting unknown options.
 
+### M2-S7: Re-review Remediation (H1-H5, M1-M3)
+- **H1: Foreground Process Group Ownership & Signal Forwarding:**
+  - `has_own_pgrp = (os.name != "nt") and capture_output`. Interactive executions connected to inherited terminal streams maintain Magy's process group, ensuring the child remains in the controlling terminal's foreground process group and preventing `SIGTTIN` stops.
+  - Signal forwarding routes to `os.killpg` only when the child owns its process group; otherwise forwards directly to `proc.send_signal()`.
+  - Added controlling-terminal PTY regression `test_pty_controlling_terminal_foreground_pgrp` using `os.setsid()` and `os.tcsetpgrp()`.
+- **H2: Complete Process-Tree Termination & Descendant Cleanup:**
+  - Added `_is_pgrp_alive(pgid)` to probe process group membership via `os.killpg(pgid, 0)`.
+  - `_kill_process_tree` waits through the full grace period even if the direct child exits early, escalating to `SIGKILL` if descendant processes in the group remain alive.
+  - Direct child is reaped via `proc.wait(timeout=1.0)` before releasing the lifecycle lease.
+  - Added `test_run_in_profile_timeout_kills_descendant_ignoring_sigterm` asserting descendant death.
+- **H3: Contained Skills Synchronization & Symlink Boundary Enforcement:**
+  - Replaced direct `config/skills` symlinking with safe contained file synchronization.
+  - Any existing symlink at `target_gemini/config/skills` is unlinked.
+  - Skills within `real_gemini/config/skills` are copied file-by-file through the standard allowlist pipeline. Intermediate and target symlinks are strictly rejected and not traversed.
+  - Added `test_sync_profile_settings_rejects_external_skills_symlink` and `test_sync_profile_settings_copies_contained_skills`.
+- **H4: Comprehensive Provider-Prefixed Credential Redaction:**
+  - Expanded `sanitize_reason()` regexes in `src/magy/agy.py` with `(?:[A-Za-z0-9_-]+[_-])?` prefix matching across all credential categories.
+  - Redacts `OPENAI_API_KEY`, `GOOGLE_ACCESS_TOKEN`, `AWS_SECRET_ACCESS_KEY`, CLI flags, and JSON fields while preserving format and context.
+  - Added leak assertions in `tests/test_health.py`.
+- **H5: Native Windows Lifecycle Locking:**
+  - Implemented `_lock_fd` and `_unlock_fd` using `kernel32.LockFileEx` (`LOCKFILE_EXCLUSIVE_LOCK`, `LOCKFILE_FAIL_IMMEDIATELY`) and `kernel32.UnlockFileEx` via `msvcrt.get_osfhandle`.
+  - Fails closed (`NotImplementedError`) on unsupported platforms.
+  - Added `test_lifecycle_lease_locking_helpers` in `tests/test_profiles.py`.
+- **M1: Legacy Registry Incarnation Migration:**
+  - `load_profiles()` automatically populates and persists missing `incarnation_id` values under the registry lock.
+  - `remove_profile()` safely handles legacy records without incarnation IDs.
+  - Added `test_remove_profile_legacy_registry_migration_and_removal`.
+- **M2: Rejection of Unregistered Profiles in Auth and Run:**
+  - `run_in_profile()` validates profile presence via `get_profile()` and raises `KeyError` if unregistered, preventing untracked home directory creation.
+  - `cli.py` handles `KeyError` with clean user error messages and exit code 1.
+  - Added `test_run_in_profile_unregistered_name_rejected` and CLI regressions in `tests/test_cli_m2.py`.
+- **M3: No-Follow Directory-Descriptor Relative Settings Sync:**
+  - Implemented `_open_descendant_dir_fd` and `_safe_copy_file_fd` using `dir_fd` and `O_NOFOLLOW` on supported platforms (POSIX).
+  - Atomic replacement via temporary files (`0o600`, `O_EXCL`) in target directory descriptor with `os.rename(..., src_dir_fd=..., dst_dir_fd=...)`.
+  - Added `test_sync_profile_settings_detects_symlink_component_during_traversal`.
+
 ## 2. Test Verification
 
 | Test Suite | Result | Details |
 | --- | --- | --- |
 | `tests/test_registry.py` | PASS | Profile metadata, add/remove/enable/disable/reset-health, external profiles, duplicate add rejection, active run removal rejection, anti-resurrection, disable/enable cooldown preservation |
-| `tests/test_settings_sync.py` | PASS | Allowlist copying, secret exclusion across all path components, source symlink skip, destination symlink rejection, destination root & source root symlink rejection (H1), atomic sync under lock |
+| `tests/test_settings_sync.py` | PASS | Allowlist copying, secret exclusion across all path components, source symlink skip, destination symlink rejection, destination root & source root symlink rejection (H1), dir_fd no-follow traversal (M3), external skills symlink rejection & contained skills copy (H3), atomic sync under lock |
 | `tests/test_routing.py` | PASS | Round-robin order, cooldown skipping, concurrent cursor advancement, monotonic `last_selected_at` (M3), selection retry on concurrent removal (M3), true multi-process barrier distribution (M5), status reporting |
-| `tests/test_health.py` | PASS | Success, auth-required, rate-limited with multi-unit retry parsing, latest retry match (M2), quota, timeout, stdout auth, latest-signal precedence, conservative cross-stream precedence (M2), bounded log tail seek, comprehensive OAuth/Basic/compound credential redaction (H5) |
-| `tests/test_cli_m2.py` | PASS | CLI subcommands, JSON outputs, passthrough routing, unknown option rejection, `--version` handling, missing profile arg rejection, equals syntax, misplaced subcommand rejection |
-| `tests/test_profiles.py` | PASS | Isolation gates, symlink hardening, active lease removal blocking (H2), ABA incarnation protection (H3), rollback on registry failure (H3), process-tree timeout cleanup & reaping (H4), normalized signal exit codes (M1), fake concurrency, CLI run/auth sync |
-| `tests/test_tty.py` | PASS | PTY interactive prompt visibility before input, prompt response, TTY status on 0/1/2, redirected stdout scriptability, private log injection, relative caller log resolution |
+| `tests/test_health.py` | PASS | Success, auth-required, rate-limited with multi-unit retry parsing, latest retry match (M2), quota, timeout, stdout auth, latest-signal precedence, conservative cross-stream precedence (M2), bounded log tail seek, comprehensive OAuth/Basic/compound/provider-prefixed credential redaction (H4, H5) |
+| `tests/test_cli_m2.py` | PASS | CLI subcommands, JSON outputs, passthrough routing, unknown option rejection, `--version` handling, missing profile arg rejection, equals syntax, misplaced subcommand rejection, unregistered profile rejection (M2) |
+| `tests/test_profiles.py` | PASS | Isolation gates, symlink hardening, active lease removal blocking (H2), ABA incarnation protection (H3), rollback on registry failure (H3), process-tree timeout cleanup & descendant death (H2), normalized signal exit codes (M1), fake concurrency, CLI run/auth sync, unregistered profile rejection (M2), legacy registry migration (M1), Windows lifecycle lock helpers (H5) |
+| `tests/test_tty.py` | PASS | PTY interactive prompt visibility before input, prompt response, TTY status on 0/1/2, redirected stdout scriptability, private log injection, relative caller log resolution, controlling-terminal foreground pgrp (H1) |
 | `tests/test_storage.py` | PASS | File locks, permissions, atomic writes |
 | `tests/test_doctor.py` | PASS | Storage and Agy diagnostics, direct executable reporting, resolver probe |
 | `tests/test_discovery.py` | PASS | PATH enumeration skipping shims, resolver execution and error handling, explicit cmd validation |
@@ -132,7 +168,8 @@ and transparent Agy passthrough.
 
 - `uv run ruff check .`: PASS (0 errors across whole repository).
 - `uv run ruff format --check .`: PASS (46 files formatted).
-- `uv run pytest`: 200 passed on Linux (Python 3.14.7).
+- `uv run pytest`: 208 passed on Linux (Python 3.14.7).
 - `uv run --python 3.11 ruff check .`: PASS.
-- `uv run --python 3.11 pytest`: 200 passed on Linux (Python 3.11.16).
+- `uv run --python 3.11 pytest`: 208 passed on Linux (Python 3.11.16).
 - `uv build`: PASS (built wheel and tarball).
+

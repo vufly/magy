@@ -182,3 +182,20 @@ def test_cli_misplaced_subcommand_rejected():
     with pytest.raises(SystemExit) as exc_info:
         main(["--profile", "misplaced-p", "status"])
     assert exc_info.value.code == 2
+
+
+def test_cli_auth_and_run_unregistered_rejected(capsys):
+    """M2: Reject auth and run on unregistered profiles without creating state."""
+    from magy.profiles import get_profile_home_dir
+
+    ret_auth = main(["profile", "auth", "nonexistent-auth-p"])
+    assert ret_auth == 1
+    err_auth = capsys.readouterr().err
+    assert "not registered" in err_auth
+    assert not get_profile_home_dir("nonexistent-auth-p").exists()
+
+    ret_run = main(["profile", "run", "nonexistent-run-p", "models"])
+    assert ret_run == 1
+    err_run = capsys.readouterr().err
+    assert "not registered" in err_run
+    assert not get_profile_home_dir("nonexistent-run-p").exists()

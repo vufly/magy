@@ -269,7 +269,7 @@ def handle_profile_command(
                 file=sys.stderr,
             )
             return 124
-        except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
+        except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as e:
             print(f"magy: error: {e}", file=sys.stderr)
             return 1
 

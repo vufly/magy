@@ -3,6 +3,7 @@ import ntpath
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import time
 import uuid
@@ -16,6 +17,24 @@ try:
 except ImportError:
     fcntl = None  # type: ignore
 
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    _kernel32 = ctypes.windll.kernel32
+    _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+    _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+
 from magy.agy import resolve_agy_executable
 from magy.config import get_data_dir, get_state_dir, load_config, load_config_result
 from magy.storage import (
@@ -28,6 +47,57 @@ from magy.storage import (
     update_json,
     validate_profile_name,
 )
+
+
+def _lock_fd(fd: int, exclusive: bool, blocking: bool = False) -> None:
+    if fcntl is not None:
+        flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(fd, flags)
+        except (BlockingIOError, OSError) as e:
+            raise BlockingIOError(f"Resource locked: {e}") from e
+    elif os.name == "nt":
+        handle = msvcrt.get_osfhandle(fd)
+        flags = _LOCKFILE_EXCLUSIVE_LOCK if exclusive else 0
+        if not blocking:
+            flags |= _LOCKFILE_FAIL_IMMEDIATELY
+        overlapped = _OVERLAPPED()
+        res = _kernel32.LockFileEx(
+            wintypes.HANDLE(handle),
+            wintypes.DWORD(flags),
+            0,
+            1,
+            0,
+            ctypes.byref(overlapped),
+        )
+        if not res:
+            err = _kernel32.GetLastError()
+            raise BlockingIOError(f"LockFileEx failed with error code {err}")
+    else:
+        raise NotImplementedError(
+            "Lifecycle lease locking is not supported on this platform"
+        )
+
+
+def _unlock_fd(fd: int) -> None:
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    elif os.name == "nt":
+        handle = msvcrt.get_osfhandle(fd)
+        overlapped = _OVERLAPPED()
+        _kernel32.UnlockFileEx(
+            wintypes.HANDLE(handle),
+            0,
+            1,
+            0,
+            ctypes.byref(overlapped),
+        )
+
 
 PROTECTED_ENV_VARS = frozenset(
     {
@@ -192,10 +262,30 @@ def get_registry_file_path() -> Path:
 
 
 def load_profiles() -> dict[str, ProfileMetadata]:
-    """Load all registered profiles."""
+    """Load all registered profiles, migrating missing incarnation IDs."""
     path = get_registry_file_path()
     data = read_json(path, lock=True, default={})
     profiles_dict = data.get("profiles", {})
+    missing = [
+        k
+        for k, v in profiles_dict.items()
+        if isinstance(v, dict) and not v.get("incarnation_id")
+    ]
+    if missing:
+
+        def _migrate(reg: Any) -> Any:
+            if not isinstance(reg, dict):
+                return reg
+            profs = reg.get("profiles", {})
+            for m in missing:
+                if m in profs and isinstance(profs[m], dict):
+                    if not profs[m].get("incarnation_id"):
+                        profs[m]["incarnation_id"] = uuid.uuid4().hex
+            return reg
+
+        data = update_json(path, _migrate, default={"version": 1, "profiles": {}})
+        profiles_dict = data.get("profiles", {})
+
     return {
         name: ProfileMetadata.from_dict(p_data)
         for name, p_data in profiles_dict.items()
@@ -241,35 +331,27 @@ def acquire_profile_lease(name: str, exclusive: bool = False):
     fd = os.open(str(lease_file), os.O_RDWR | os.O_CREAT, 0o600)
     ensure_private_file(lease_file)
 
-    if fcntl is not None:
-        lock_flags = (
-            (fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if exclusive
-            else (fcntl.LOCK_SH | fcntl.LOCK_NB)
-        )
-        try:
-            fcntl.flock(fd, lock_flags)
-        except (BlockingIOError, OSError) as e:
-            os.close(fd)
-            if exclusive:
-                raise RuntimeError(
-                    f"Cannot remove profile '{validated}': "
-                    "active operations are running"
-                ) from e
-            else:
-                raise RuntimeError(
-                    f"Cannot operate on profile '{validated}': "
-                    "profile is locked by another operation"
-                ) from e
+    try:
+        _lock_fd(fd, exclusive=exclusive, blocking=False)
+    except (BlockingIOError, OSError) as e:
+        os.close(fd)
+        if exclusive:
+            raise RuntimeError(
+                f"Cannot remove profile '{validated}': active operations are running"
+            ) from e
+        else:
+            raise RuntimeError(
+                f"Cannot operate on profile '{validated}': "
+                "profile is locked by another operation"
+            ) from e
 
     try:
         yield
     finally:
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+        try:
+            _unlock_fd(fd)
+        except OSError:
+            pass
         try:
             os.close(fd)
         except OSError:
@@ -297,13 +379,9 @@ def get_active_operation_count(name: str) -> int:
     except OSError:
         return 0
 
-    if fcntl is None:
-        os.close(fd)
-        return 0
-
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _lock_fd(fd, exclusive=True, blocking=False)
+        _unlock_fd(fd)
         os.close(fd)
         return 0
     except (BlockingIOError, OSError):
@@ -394,7 +472,8 @@ def remove_profile(name: str, force: bool = False) -> None:
             curr = profiles.get(validated)
             if curr is None:
                 raise KeyError(f"Profile '{validated}' does not exist")
-            if curr.get("incarnation_id") != target_incarnation:
+            curr_incarnation = curr.get("incarnation_id")
+            if curr_incarnation is not None and curr_incarnation != target_incarnation:
                 raise ValueError(
                     f"Profile '{validated}' was modified or recreated concurrently "
                     "(incarnation mismatch)"
@@ -624,17 +703,167 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
     def _is_rel_path_denied(rel_path: Path) -> bool:
         return any(_is_component_denied(part) for part in rel_path.parts)
 
-    def _safe_copy_file(src: Path, rel_path: Path) -> None:
+    supports_dir_fd = (
+        hasattr(os, "supports_dir_fd")
+        and os.open in os.supports_dir_fd
+        and getattr(os, "O_NOFOLLOW", None) is not None
+    )
+
+    def _open_descendant_dir_fd(
+        root_dfd: int,
+        subparts: tuple[str, ...],
+        create: bool = False,
+    ) -> int:
+        curr_dfd = os.dup(root_dfd)
+        opened = [curr_dfd]
+        try:
+            for part in subparts:
+                if _is_component_denied(part):
+                    raise ValueError(f"Denied path component: {part}")
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                try:
+                    next_dfd = os.open(part, flags, dir_fd=curr_dfd)
+                except FileNotFoundError:
+                    if create:
+                        os.mkdir(part, 0o700, dir_fd=curr_dfd)
+                        next_dfd = os.open(part, flags, dir_fd=curr_dfd)
+                    else:
+                        raise
+                opened.append(next_dfd)
+                curr_dfd = next_dfd
+            res_fd = os.dup(curr_dfd)
+            return res_fd
+        finally:
+            for fd in opened:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def _safe_copy_file_fd(
+        src_root_dfd: int,
+        target_root_dfd: int,
+        rel_path: Path,
+    ) -> None:
         if _is_rel_path_denied(rel_path):
             return
 
-        # Do not follow source symlinks
+        parts = rel_path.parts
+        filename = parts[-1]
+        dir_parts = parts[:-1]
+
+        src_parent_dfd = None
+        target_parent_dfd = None
+        src_fd = None
+        tmp_fd = None
+        tmp_name = f".tmp_sync_{uuid.uuid4().hex}"
+
+        try:
+            src_parent_dfd = _open_descendant_dir_fd(
+                src_root_dfd, dir_parts, create=False
+            )
+        except OSError:
+            return
+
+        try:
+            src_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                src_fd = os.open(filename, src_flags, dir_fd=src_parent_dfd)
+            except OSError:
+                return
+
+            st_src = os.fstat(src_fd)
+            if not stat.S_ISREG(st_src.st_mode):
+                return
+
+            chunks = []
+            total_read = 0
+            max_size = 10 * 1024 * 1024
+            while True:
+                chunk = os.read(src_fd, 65536)
+                if not chunk:
+                    break
+                total_read += len(chunk)
+                if total_read > max_size:
+                    return
+                chunks.append(chunk)
+            content = b"".join(chunks)
+
+            try:
+                target_parent_dfd = _open_descendant_dir_fd(
+                    target_root_dfd, dir_parts, create=True
+                )
+            except OSError:
+                return
+
+            try:
+                st_dst = os.lstat(filename, dir_fd=target_parent_dfd)
+                if stat.S_ISLNK(st_dst.st_mode):
+                    return
+            except FileNotFoundError:
+                pass
+
+            tmp_flags = (
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            )
+            tmp_fd = os.open(tmp_name, tmp_flags, 0o600, dir_fd=target_parent_dfd)
+            offset = 0
+            while offset < len(content):
+                w = os.write(tmp_fd, content[offset:])
+                if w == 0:
+                    break
+                offset += w
+            os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            tmp_fd = None
+
+            os.rename(
+                tmp_name,
+                filename,
+                src_dir_fd=target_parent_dfd,
+                dst_dir_fd=target_parent_dfd,
+            )
+            copied_files.append(target_gemini / rel_path)
+        except OSError:
+            return
+        finally:
+            if tmp_fd is not None:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            if target_parent_dfd is not None:
+                try:
+                    os.unlink(tmp_name, dir_fd=target_parent_dfd)
+                except OSError:
+                    pass
+                try:
+                    os.close(target_parent_dfd)
+                except OSError:
+                    pass
+            if src_fd is not None:
+                try:
+                    os.close(src_fd)
+                except OSError:
+                    pass
+            if src_parent_dfd is not None:
+                try:
+                    os.close(src_parent_dfd)
+                except OSError:
+                    pass
+
+    def _safe_copy_file_path(src: Path, rel_path: Path) -> None:
+        if _is_rel_path_denied(rel_path):
+            return
+
         if src.is_symlink() or os.path.islink(src):
             return
 
         dest = target_gemini / rel_path
-
-        # Reject destination if it or any intermediate directory is a symlink
         curr = target_gemini
         for part in rel_path.parts[:-1]:
             curr = curr / part
@@ -662,7 +891,6 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
                     return
                 ensure_private_directory(curr)
 
-        # Reject if destination file itself is a symlink
         if dest.is_symlink() or os.path.islink(dest):
             return
         if dest.exists():
@@ -699,64 +927,84 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
     with sync_lock:
         validate_profile_layout(name)
 
-        # 1. Sync allowlisted files
-        for rel_str in ALLOWLISTED_SETTINGS_FILES:
-            rel_path = Path(rel_str)
-            src_path = real_gemini_dir / rel_path
-            if src_path.exists() and src_path.is_file():
-                _safe_copy_file(src_path, rel_path)
+        # Ensure any pre-existing symlink at config/skills is cleaned up
+        skills_dest = target_gemini / "config" / "skills"
+        if skills_dest.is_symlink() or os.path.islink(skills_dest):
+            try:
+                skills_dest.unlink()
+            except OSError:
+                pass
 
-        # 2. Sync allowlisted directories
-        for rel_dir_str in ALLOWLISTED_SETTINGS_DIRS:
-            rel_dir = Path(rel_dir_str)
-            src_dir = real_gemini_dir / rel_dir
-            if (
-                src_dir.exists()
-                and src_dir.is_dir()
-                and not (src_dir.is_symlink() or os.path.islink(src_dir))
-            ):
-                for root, dirs, files in os.walk(src_dir):
-                    valid_dirs = []
-                    for d in dirs:
-                        d_path = Path(root) / d
-                        if d_path == real_gemini_dir / "config" / "skills":
-                            continue
-                        if d_path.is_symlink() or os.path.islink(d_path):
-                            continue
-                        rel_d = d_path.relative_to(real_gemini_dir)
-                        if _is_rel_path_denied(rel_d):
-                            continue
-                        valid_dirs.append(d)
-                    dirs[:] = valid_dirs
+        src_root_dfd = None
+        target_root_dfd = None
+        if supports_dir_fd:
+            try:
+                src_root_dfd = os.open(
+                    str(real_gemini_dir),
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+                target_root_dfd = os.open(
+                    str(target_gemini),
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except OSError:
+                src_root_dfd = None
+                target_root_dfd = None
 
-                    for f in files:
-                        f_path = Path(root) / f
-                        if f_path.is_symlink() or os.path.islink(f_path):
-                            continue
-                        rel_f = f_path.relative_to(real_gemini_dir)
-                        _safe_copy_file(f_path, rel_f)
+        def _do_copy(src_p: Path, rel_p: Path) -> None:
+            if src_root_dfd is not None and target_root_dfd is not None:
+                _safe_copy_file_fd(src_root_dfd, target_root_dfd, rel_p)
+            else:
+                _safe_copy_file_path(src_p, rel_p)
 
-        # 3. Symlink skills directory if available in real .gemini
-        skills_src: Path | None = None
-        if (real_gemini_dir / "config" / "skills").exists():
-            skills_src = real_gemini_dir / "config" / "skills"
-        elif (real_gemini_dir / "skills").exists():
-            skills_src = real_gemini_dir / "skills"
+        try:
+            # 1. Sync allowlisted files
+            for rel_str in ALLOWLISTED_SETTINGS_FILES:
+                rel_path = Path(rel_str)
+                src_path = real_gemini_dir / rel_path
+                if src_path.exists() and src_path.is_file():
+                    _do_copy(src_path, rel_path)
 
-        if skills_src is not None:
-            skills_dest = target_gemini / "config" / "skills"
-            ensure_private_directory(skills_dest.parent)
-            if skills_dest.is_symlink() or os.path.islink(skills_dest):
+            # 2. Sync allowlisted directories
+            for rel_dir_str in ALLOWLISTED_SETTINGS_DIRS:
+                rel_dir = Path(rel_dir_str)
+                src_dir = real_gemini_dir / rel_dir
+                if (
+                    src_dir.exists()
+                    and src_dir.is_dir()
+                    and not (src_dir.is_symlink() or os.path.islink(src_dir))
+                ):
+                    for root, dirs, files in os.walk(src_dir, followlinks=False):
+                        valid_dirs = []
+                        for d in dirs:
+                            d_path = Path(root) / d
+                            if d_path.is_symlink() or os.path.islink(d_path):
+                                continue
+                            rel_d = d_path.relative_to(real_gemini_dir)
+                            if _is_rel_path_denied(rel_d):
+                                continue
+                            valid_dirs.append(d)
+                        dirs[:] = valid_dirs
+
+                        for f in files:
+                            f_path = Path(root) / f
+                            if f_path.is_symlink() or os.path.islink(f_path):
+                                continue
+                            rel_f = f_path.relative_to(real_gemini_dir)
+                            _do_copy(f_path, rel_f)
+        finally:
+            if target_root_dfd is not None:
                 try:
-                    current_target = os.readlink(str(skills_dest))
-                    if current_target != str(skills_src):
-                        skills_dest.unlink()
-                        skills_dest.symlink_to(skills_src)
+                    os.close(target_root_dfd)
                 except OSError:
                     pass
-            elif not skills_dest.exists():
+            if src_root_dfd is not None:
                 try:
-                    skills_dest.symlink_to(skills_src)
+                    os.close(src_root_dfd)
                 except OSError:
                     pass
 
@@ -856,39 +1104,83 @@ def build_profile_env(
     return env
 
 
-def _kill_process_tree(proc: subprocess.Popen, grace: float = 1.0) -> None:
-    """Terminate child process and all descendants, escalating to SIGKILL."""
-    if proc.poll() is not None:
-        return
+def _is_pgrp_alive(pgid: int) -> bool:
+    """Return True if any process in the process group pgid is alive."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
 
+
+def _kill_process_tree(
+    proc: subprocess.Popen,
+    grace: float = 1.0,
+    is_pgrp: bool | None = None,
+) -> None:
+    """Terminate child process and all descendants, escalating to SIGKILL.
+
+    If is_pgrp is True (or proc is group leader on POSIX), signals the entire
+    process group and ensures all descendants are dead and direct child is
+    reaped before returning.
+    """
     pid = proc.pid
     if os.name != "nt":
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
+        if is_pgrp is None:
             try:
-                proc.terminate()
+                is_pgrp = os.getpgid(pid) == pid
             except OSError:
+                is_pgrp = False
+
+        if is_pgrp:
+            # 1. Send SIGTERM to entire process group
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
                 pass
 
-        deadline = time.time() + grace
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                return
-            time.sleep(0.05)
+            # 2. Wait up to grace seconds; do not exit early if descendants remain
+            deadline = time.time() + grace
+            while time.time() < deadline:
+                if not _is_pgrp_alive(pid):
+                    break
+                time.sleep(0.05)
 
+            # 3. If any processes remain in the group, escalate to SIGKILL
+            if _is_pgrp_alive(pid):
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+                kill_deadline = time.time() + 1.0
+                while time.time() < kill_deadline:
+                    if not _is_pgrp_alive(pid):
+                        break
+                    time.sleep(0.05)
+
+            # 4. Reap direct child
+            try:
+                proc.wait(timeout=1.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            return
+
+        # Fallback for POSIX process not in its own process group
         try:
-            os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
+            proc.terminate()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=grace)
+        except (subprocess.TimeoutExpired, OSError):
             try:
                 proc.kill()
+                proc.wait(timeout=1.0)
             except OSError:
                 pass
-
-        try:
-            proc.wait(timeout=1.0)
-        except (subprocess.TimeoutExpired, OSError):
-            pass
     else:
         try:
             proc.terminate()
@@ -922,10 +1214,14 @@ def run_in_profile(
 
     with acquire_profile_lease(validated, exclusive=False):
         profile = get_profile(validated)
-        if profile is not None and not profile.enabled:
+        if profile is None:
+            raise KeyError(f"Profile '{validated}' is not registered")
+        if not profile.enabled:
             raise ValueError(f"Profile '{validated}' is disabled")
+        if not profile.incarnation_id:
+            raise ValueError(f"Profile '{validated}' has invalid incarnation ID")
 
-        if profile is None or profile.kind == "managed":
+        if profile.kind == "managed":
             validate_profile_layout(validated)
             if sync_settings:
                 sync_profile_settings(validated)
@@ -996,11 +1292,13 @@ def run_in_profile(
 
         cmd = [str(executable), *cmd_args]
 
+        has_own_pgrp = (os.name != "nt") and capture_output
+
         popen_kwargs: dict[str, Any] = {
             "env": env,
             "cwd": cwd,
         }
-        if os.name != "nt":
+        if has_own_pgrp:
             popen_kwargs["process_group"] = 0
 
         if capture_output:
@@ -1015,7 +1313,7 @@ def run_in_profile(
         proc = subprocess.Popen(cmd, **popen_kwargs)
 
         def _forward_signal(signum: int, frame: Any) -> None:
-            if os.name != "nt":
+            if has_own_pgrp:
                 try:
                     os.killpg(proc.pid, signum)
                 except OSError:
@@ -1058,7 +1356,7 @@ def run_in_profile(
                 stderr_text = ""
         except subprocess.TimeoutExpired as exc:
             timed_out = True
-            _kill_process_tree(proc, grace=1.0)
+            _kill_process_tree(proc, grace=1.0, is_pgrp=has_own_pgrp)
             retcode = 124
             if update_health:
                 cfg = load_config()
@@ -1075,8 +1373,8 @@ def run_in_profile(
                 signal.signal(signal.SIGINT, old_sigint)
             if old_sigterm is not None:
                 signal.signal(signal.SIGTERM, old_sigterm)
-            if proc.poll() is None:
-                _kill_process_tree(proc, grace=1.0)
+            if proc.poll() is None or (has_own_pgrp and _is_pgrp_alive(proc.pid)):
+                _kill_process_tree(proc, grace=1.0, is_pgrp=has_own_pgrp)
 
         if retcode is not None and retcode < 0:
             retcode = 128 + abs(retcode)

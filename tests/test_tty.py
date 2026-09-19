@@ -228,3 +228,87 @@ def test_inherited_mode_relative_caller_log_resolved_against_cwd(
     prof = get_profile("cwd-log-p")
     assert prof.health == "auth-required"
     assert prof.cooldown_until is not None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="PTY integration tests are POSIX-only")
+def test_pty_controlling_terminal_foreground_pgrp(fake_agy, monkeypatch, tmp_path):
+    """H1: Interactive auth child stays in foreground pgrp without SIGTTIN stop."""
+    import fcntl
+    import pty
+    import termios
+
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    add_profile("ctty-auth-p")
+
+    master, slave = pty.openpty()
+
+    def _setup_ctty():
+        os.setsid()
+        try:
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        except (OSError, AttributeError):
+            pass
+        try:
+            os.tcsetpgrp(0, os.getpgrp())
+        except OSError:
+            pass
+
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "magy.cli",
+                "profile",
+                "auth",
+                "ctty-auth-p",
+                "--",
+                "--interactive-probe",
+            ],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            preexec_fn=_setup_ctty,
+            close_fds=True,
+            env=os.environ,
+        )
+    finally:
+        os.close(slave)
+
+    # 1. Wait for prompt
+    received_bytes = b""
+    start = time.time()
+    while time.time() - start < 5.0:
+        r, _, _ = select.select([master], [], [], 0.1)
+        if r:
+            chunk = os.read(master, 1024)
+            if not chunk:
+                break
+            received_bytes += chunk
+            if b"AUTH_PROMPT>" in received_bytes:
+                break
+        if proc.poll() is not None:
+            break
+
+    assert b"AUTH_PROMPT>" in received_bytes
+
+    # 2. Write input - must succeed without child being stopped by SIGTTIN
+    os.write(master, b"test-ctty-token\n")
+
+    while time.time() - start < 5.0:
+        r, _, _ = select.select([master], [], [], 0.1)
+        if r:
+            chunk = os.read(master, 1024)
+            if not chunk:
+                break
+            received_bytes += chunk
+            if b"RECEIVED:test-ctty-token" in received_bytes:
+                break
+        if proc.poll() is not None:
+            break
+
+    ret = proc.wait(timeout=5.0)
+    os.close(master)
+
+    assert ret == 0
+    assert b"RECEIVED:test-ctty-token" in received_bytes

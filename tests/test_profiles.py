@@ -109,7 +109,8 @@ def test_ensure_profile_layout_rejects_symlink_profiles_root(tmp_path: Path):
 
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
 def test_ensure_profile_layout_rejects_symlink_credential_subtree(tmp_path: Path):
-    p_dir, p_home = ensure_profile_layout("symlink-cred")
+    add_profile("symlink-cred", kind="managed")
+    p_home = get_profile_home_dir("symlink-cred")
     gemini_dir = p_home / ".gemini"
     external_creds = tmp_path / "external_creds"
     external_creds.mkdir()
@@ -133,7 +134,8 @@ def test_profile_layout_rejects_real_home_symlink(tmp_path: Path):
     real_gemini = real_home / ".gemini"
     real_gemini.mkdir(parents=True)
 
-    p_dir, p_home = ensure_profile_layout("real-home-symlink")
+    add_profile("real-home-symlink", kind="managed")
+    p_home = get_profile_home_dir("real-home-symlink")
     gemini_dir = p_home / ".gemini"
     shutil.rmtree(gemini_dir)
     gemini_dir.symlink_to(real_gemini)
@@ -147,8 +149,9 @@ def test_profile_layout_rejects_real_home_symlink(tmp_path: Path):
 
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
 def test_profile_layout_rejects_cross_profile_symlink():
-    ensure_profile_layout("profile-alpha")
-    _p_dir_beta, p_home_beta = ensure_profile_layout("profile-beta")
+    add_profile("profile-alpha", kind="managed")
+    add_profile("profile-beta", kind="managed")
+    p_home_beta = get_profile_home_dir("profile-beta")
 
     alpha_gemini = get_profile_home_dir("profile-alpha") / ".gemini"
     beta_gemini = p_home_beta / ".gemini"
@@ -235,6 +238,7 @@ def test_run_in_profile_protected_env_overrides_rejected(
     protected_key, fake_agy, monkeypatch
 ):
     monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    add_profile("sec-profile", kind="managed")
 
     with pytest.raises(
         ValueError, match="Cannot override protected profile environment variables"
@@ -254,6 +258,7 @@ def test_run_in_profile_respects_config_agy_cmd(fake_agy, monkeypatch):
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(f'{{"agy_cmd": "{fake_agy.executable}"}}', encoding="utf-8")
 
+    add_profile("cfg-profile", kind="managed")
     ret = run_in_profile("cfg-profile", ["models"])
     assert ret == 0
 
@@ -270,6 +275,7 @@ def test_run_in_profile_invalid_config_fails_cleanly(fake_agy, monkeypatch):
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text('{"agy_cmd": "/nonexistent/path/to/agy"}', encoding="utf-8")
 
+    add_profile("bad-cfg", kind="managed")
     with pytest.raises(FileNotFoundError, match="Agy executable invalid"):
         run_in_profile("bad-cfg", ["models"])
 
@@ -277,6 +283,9 @@ def test_run_in_profile_invalid_config_fails_cleanly(fake_agy, monkeypatch):
 def test_stage2_persistent_fake_accounts(fake_agy, monkeypatch, tmp_path: Path):
     """Stage 2 verification: persistent account alias markers in profile homes."""
     monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+
+    add_profile("profile-a", kind="managed")
+    add_profile("profile-b", kind="managed")
 
     # 1. Profile A and Profile B record different aliases
     ret_a = run_in_profile("profile-a", ["--record-alias", "account-A"])
@@ -378,6 +387,7 @@ def test_cli_profile_exit_code_forwarding(fake_agy, monkeypatch):
     monkeypatch.setenv("FAKE_AGY_MODE", "auth_error")
     monkeypatch.setenv("FAKE_AGY_EXIT_CODE", "42")
 
+    add_profile("exit-profile", kind="managed")
     ret = main(["profile", "run", "exit-profile", "models"])
     assert ret == 42
 
@@ -385,6 +395,7 @@ def test_cli_profile_exit_code_forwarding(fake_agy, monkeypatch):
 def test_cli_profile_preserves_double_dash_args(fake_agy, monkeypatch):
     monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
 
+    add_profile("dash-profile", kind="managed")
     ret = main(["profile", "run", "dash-profile", "--", "--flag", "--other", "val"])
     assert ret == 0
 
@@ -398,6 +409,7 @@ def test_cli_profile_missing_executable_error(monkeypatch, capsys):
     monkeypatch.delenv("MAGY_AGY_CMD", raising=False)
     monkeypatch.setenv("PATH", "")
 
+    add_profile("no-exe-profile", kind="managed")
     ret = main(["profile", "run", "no-exe-profile", "models"])
     assert ret == 1
     captured = capsys.readouterr()
@@ -422,6 +434,7 @@ def test_cli_profile_rejects_unknown_top_level_options():
 def test_profile_environment_isolation_and_xdg_roots(fake_agy, monkeypatch):
     monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
 
+    add_profile("xdg-p", kind="managed")
     ret = run_in_profile("xdg-p", ["models"])
     assert ret == 0
 
@@ -466,6 +479,7 @@ def test_profile_launch_skips_indirect_and_prevents_side_effects(
 
     monkeypatch.setenv("PATH", f"{bin1}:{bin2}")
 
+    add_profile("skip-indirect-p", kind="managed")
     ret = run_in_profile("skip-indirect-p", ["models"])
     assert ret == 0
     assert not side_effect.exists()
@@ -478,6 +492,7 @@ def test_profile_launch_skips_indirect_and_prevents_side_effects(
 def test_profile_explicit_xdg_env_preserved(fake_agy, monkeypatch):
     monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
 
+    add_profile("custom-xdg", kind="managed")
     ret = run_in_profile(
         "custom-xdg",
         ["models"],
@@ -612,3 +627,117 @@ def test_run_in_profile_signal_exit_code_normalized(tmp_path):
     )
     # Signal 15 -> 128 + 15 = 143
     assert ret == 143
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Process group and signals for POSIX")
+def test_run_in_profile_timeout_kills_descendant_ignoring_sigterm(tmp_path):
+    """H2: Timeout escalates to SIGKILL and kills descendant ignoring SIGTERM.
+
+    Verifies process group cleanup completes even if the direct child exits.
+    """
+    import subprocess
+    import sys
+
+    from magy.profiles import get_active_operation_count, run_in_profile
+
+    pid_file = tmp_path / "descendant.pid"
+
+    descendant_script = tmp_path / "descendant.py"
+    descendant_script.write_text(
+        "import os, signal, time, pathlib\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path(r'{pid_file}').write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    direct_script = tmp_path / "direct_child.py"
+    direct_script.write_text(
+        "import subprocess, sys, signal, time\n"
+        f"cmd = [sys.executable, r'{descendant_script}']\n"
+        "proc = subprocess.Popen(cmd)\n"
+        "signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    add_profile("timeout-descendant-p", kind="managed")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_in_profile(
+            "timeout-descendant-p",
+            [str(direct_script)],
+            executable=Path(sys.executable),
+            capture_output=True,
+            timeout=0.3,
+            update_health=True,
+        )
+
+    # 1. Descendant PID was recorded
+    assert pid_file.exists()
+    descendant_pid = int(pid_file.read_text().strip())
+
+    # 2. Descendant must be dead (killed by SIGKILL escalation)
+    with pytest.raises(ProcessLookupError):
+        os.kill(descendant_pid, 0)
+
+    # 3. Lease count must be 0 after cleanup
+    assert get_active_operation_count("timeout-descendant-p") == 0
+
+
+def test_remove_profile_legacy_registry_migration_and_removal():
+    """M1: Legacy registries without incarnation_id are migrated cleanly."""
+    from magy.config import get_data_dir
+    from magy.profiles import (
+        ensure_profile_layout,
+        get_profile,
+        load_profiles,
+        remove_profile,
+    )
+    from magy.storage import atomic_write_json
+
+    reg_path = get_data_dir() / "profiles.json"
+    legacy_data = {
+        "version": 1,
+        "profiles": {
+            "legacy-p": {
+                "name": "legacy-p",
+                "kind": "managed",
+                "home_dir": str(get_profile_home_dir("legacy-p")),
+                "enabled": True,
+                "created_at": 1700000000.0,
+                "health": "healthy",
+            }
+        },
+    }
+    ensure_profile_layout("legacy-p")
+    atomic_write_json(reg_path, legacy_data, lock=True)
+
+    # load_profiles migrates and persists incarnation_id
+    profs = load_profiles()
+    assert "legacy-p" in profs
+    assert profs["legacy-p"].incarnation_id is not None
+
+    # remove_profile succeeds without incarnation mismatch
+    remove_profile("legacy-p")
+    assert get_profile("legacy-p") is None
+
+
+def test_run_in_profile_unregistered_name_rejected():
+    """M2: Reject unregistered profile name without creating home or layout."""
+    with pytest.raises(KeyError, match="not registered"):
+        run_in_profile("never-registered-p", ["models"])
+
+    home_dir = get_profile_home_dir("never-registered-p")
+    assert not home_dir.exists()
+
+
+def test_lifecycle_lease_locking_helpers(monkeypatch):
+    """H5: Verify lease locking semantics and unsupported platform rejection."""
+    import magy.profiles
+
+    monkeypatch.setattr(magy.profiles, "fcntl", None)
+    monkeypatch.setattr(os, "name", "unknown_os")
+
+    with pytest.raises(NotImplementedError, match="not supported"):
+        magy.profiles._lock_fd(123, exclusive=True)

@@ -132,6 +132,32 @@ def test_sanitize_reason_redaction():
     assert "/home/vudinhn" not in san4
     assert "~/.gemini" in san4
 
+    # Provider-prefixed credentials (H4)
+    raw5 = "Error: OPENAI_API_KEY=sk-proj-abc12345 failed verification"
+    san5 = sanitize_reason(raw5)
+    assert "sk-proj-abc12345" not in san5
+    assert "OPENAI_API_KEY=[REDACTED]" in san5
+
+    raw6 = "Request failed: GOOGLE_ACCESS_TOKEN=ya29.a0AfH6SMD_secret123456 expired"
+    san6 = sanitize_reason(raw6)
+    assert "ya29.a0AfH6SMD_secret123456" not in san6
+    assert "GOOGLE_ACCESS_TOKEN=[REDACTED]" in san6
+
+    raw7 = (
+        "Auth error: AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        " invalid"
+    )
+    san7 = sanitize_reason(raw7)
+    assert "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" not in san7
+    assert "AWS_SECRET_ACCESS_KEY=[REDACTED]" in san7
+
+    raw8 = '{"OPENAI_API_KEY": "sk-12345", "ANTHROPIC_API_KEY": "sk-ant-999"}'
+    san8 = sanitize_reason(raw8)
+    assert "sk-12345" not in san8
+    assert "sk-ant-999" not in san8
+    assert '"OPENAI_API_KEY": "[REDACTED]"' in san8
+    assert '"ANTHROPIC_API_KEY": "[REDACTED]"' in san8
+
 
 def test_read_bounded_log_tail(tmp_path: Path):
     log_file = tmp_path / "test.log"

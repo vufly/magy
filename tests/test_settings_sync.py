@@ -242,7 +242,7 @@ def test_sync_profile_settings_copies_gemini_md(tmp_path: Path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
-def test_sync_profile_settings_symlinks_skills_directory(tmp_path: Path):
+def test_sync_profile_settings_rejects_external_skills_symlink(tmp_path: Path):
     real_gemini = tmp_path / "real_gemini"
     real_gemini.mkdir()
     cfg_dir = real_gemini / "config"
@@ -263,12 +263,52 @@ def test_sync_profile_settings_symlinks_skills_directory(tmp_path: Path):
     target_gemini = get_profile_home_dir("skills-sync-p") / ".gemini"
     target_skills = target_gemini / "config" / "skills"
 
-    assert target_skills.is_symlink()
-    assert os.readlink(str(target_skills)) == str(cfg_dir / "skills")
-    assert (target_skills / "skill_a" / "SKILL.md").exists()
-    assert (target_skills / "skill_a" / "SKILL.md").read_text(
-        encoding="utf-8"
-    ) == "name: skill_a"
+    # Must NOT follow external symlink or create symlink in profile (H3)
+    assert not target_skills.exists()
+    assert not target_skills.is_symlink()
+
+
+def test_sync_profile_settings_copies_contained_skills(tmp_path: Path):
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    skills_dir = real_gemini / "config" / "skills" / "skill_a"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("name: skill_a", encoding="utf-8")
+
+    add_profile("skills-copy-p", kind="managed")
+    sync_profile_settings("skills-copy-p", real_gemini_dir=real_gemini)
+
+    target_gemini = get_profile_home_dir("skills-copy-p") / ".gemini"
+    target_skill_file = target_gemini / "config" / "skills" / "skill_a" / "SKILL.md"
+
+    assert target_skill_file.exists()
+    assert target_skill_file.read_text(encoding="utf-8") == "name: skill_a"
+    assert not target_skill_file.is_symlink()
+    assert not (target_gemini / "config" / "skills").is_symlink()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="dir_fd and symlink tests for POSIX")
+def test_sync_profile_settings_detects_symlink_component_during_traversal(
+    tmp_path: Path,
+):
+    """M3: Traversal with no-follow rejects symlink intermediate components."""
+    real_gemini = tmp_path / "real_gemini"
+    real_gemini.mkdir()
+    cfg_dir = real_gemini / "config"
+    cfg_dir.mkdir()
+
+    secret_dir = tmp_path / "outside_secret"
+    secret_dir.mkdir()
+    (secret_dir / "secret.json").write_text('{"secret": "leak"}', encoding="utf-8")
+
+    (cfg_dir / "evil_link").symlink_to(secret_dir)
+
+    add_profile("traversal-sec-p", kind="managed")
+    sync_profile_settings("traversal-sec-p", real_gemini_dir=real_gemini)
+
+    target_gemini = get_profile_home_dir("traversal-sec-p") / ".gemini"
+    assert not (target_gemini / "config" / "evil_link").exists()
+    assert not (target_gemini / "config" / "secret.json").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
