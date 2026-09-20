@@ -101,13 +101,12 @@ Specify a profile using the `-p` / `--profile` flag:
 magy -p work -- "Investigate the memory leak in the billing service"
 ```
 
-#### Default / Current Profile
+#### Inspecting Profiles
 
-Set a default active profile for single-profile usage:
+Inspect details and health for a specific profile:
 
 ```bash
-magy profile set-current work
-magy profile current
+magy profile show work
 ```
 
 ---

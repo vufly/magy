@@ -52,7 +52,7 @@ Milestone 4 completes the quality hardening, automated test matrix, security rev
 ### M4-S4: User Documentation
 - Replaced scaffold [`README.md`](file:///home/vudinhn/repos/magy/README.md) with comprehensive product documentation:
   - Installation via `uv tool install` and local development instructions.
-  - Profile commands (`add`, `auth`, `create`, `list`, `show`, `enable`, `disable`, `current`, `set-current`).
+  - Profile commands (`add`, `create`, `auth`, `run`, `list`, `show`, `enable`, `disable`, `reset-health`, `remove`, and `--current` flag).
   - Automatic round-robin and explicit launcher examples.
   - Routing, cooldown backoff, and no-replay guarantee.
   - MCP server setup (`magy-mcp`) for Codex and OpenCode.
