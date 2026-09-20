@@ -434,6 +434,8 @@ def test_cli_profile_rejects_unknown_top_level_options():
 
 def test_profile_environment_isolation_and_xdg_roots(fake_agy, monkeypatch):
     monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/host/custom/config")
+    monkeypatch.setenv("XDG_DATA_HOME", "/host/custom/data")
 
     add_profile("xdg-p", kind="managed")
     ret = run_in_profile("xdg-p", ["models"])

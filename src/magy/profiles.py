@@ -1177,14 +1177,10 @@ def build_profile_env(
     apply_home_to_env(p_home_str, env, os_type)
     if os_type != "nt":
         p_home_path = Path(p_home_str)
-        if "XDG_CONFIG_HOME" not in env:
-            env["XDG_CONFIG_HOME"] = str(p_home_path / ".config")
-        if "XDG_DATA_HOME" not in env:
-            env["XDG_DATA_HOME"] = str(p_home_path / ".local" / "share")
-        if "XDG_CACHE_HOME" not in env:
-            env["XDG_CACHE_HOME"] = str(p_home_path / ".cache")
-        if "XDG_STATE_HOME" not in env:
-            env["XDG_STATE_HOME"] = str(p_home_path / ".local" / "state")
+        env["XDG_CONFIG_HOME"] = str(p_home_path / ".config")
+        env["XDG_DATA_HOME"] = str(p_home_path / ".local" / "share")
+        env["XDG_CACHE_HOME"] = str(p_home_path / ".cache")
+        env["XDG_STATE_HOME"] = str(p_home_path / ".local" / "state")
     return env
 
 
