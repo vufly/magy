@@ -1,5 +1,12 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
+
+import pytest
+from mcp import Client, StdioServerParameters
+from mcp.server.mcpserver.exceptions import ToolError
 
 from magy.mcp_server import create_mcp_server
 from magy.profiles import add_profile
@@ -25,6 +32,12 @@ def test_mcp_server_registers_all_six_tools():
         start_tool = next(t for t in tools if t.name == "magy_run_start")
         assert "auto_approval" in start_tool.description
         assert "--dangerously-skip-permissions" in start_tool.description
+        assert start_tool.input_schema["additionalProperties"] is False
+        assert start_tool.output_schema is not None
+        result_tool = next(t for t in tools if t.name == "magy_run_result")
+        limit_schema = result_tool.input_schema["properties"]["limit"]
+        assert limit_schema["minimum"] == 4
+        assert limit_schema["maximum"] == 1024 * 1024
 
     asyncio.run(_test())
 
@@ -112,8 +125,172 @@ def test_mcp_profiles():
         names = [p["name"] for p in prof_data["profiles"]]
         assert "mcp-query-p" in names
         assert "routing" in prof_data
+        profile = next(p for p in prof_data["profiles"] if p["name"] == "mcp-query-p")
+        assert "home_dir" not in profile
+        assert "incarnation_id" not in profile
+        assert "available" in profile
 
     asyncio.run(_test())
+
+
+def test_mcp_rejects_unknown_auto_approval_field():
+    async def _test():
+        server = create_mcp_server()
+        with pytest.raises(ToolError, match="Unknown tool input property"):
+            await server.call_tool(
+                "magy_run_start",
+                {"prompt": "test", "auto_approve": False},
+            )
+
+    asyncio.run(_test())
+
+
+def test_mcp_strict_runtime_types_and_nullable_sandbox(monkeypatch):
+    import magy.mcp_server
+    from magy.runs import RunStatus
+
+    monkeypatch.setattr(
+        magy.mcp_server,
+        "start_run",
+        lambda **kwargs: RunStatus(run_id="run_test", status="queued"),
+    )
+
+    async def _test():
+        server = create_mcp_server()
+        with pytest.raises(ToolError, match="offset must be an integer"):
+            await server.call_tool(
+                "magy_run_result",
+                {"run_id": "missing", "offset": True},
+            )
+        with pytest.raises(ToolError, match="timeout must be a number"):
+            await server.call_tool(
+                "magy_run_wait",
+                {"run_id": "missing", "timeout": "1"},
+            )
+        with pytest.raises(ToolError, match="additional_dirs must be an array"):
+            await server.call_tool(
+                "magy_run_start",
+                {"prompt": "test", "additional_dirs": '["/tmp"]'},
+            )
+
+        result = await server.call_tool(
+            "magy_run_start",
+            {"prompt": "test", "sandbox": None},
+        )
+        assert result.structured_content["status"] == "queued"
+
+    asyncio.run(_test())
+
+
+def test_mcp_errors_are_sanitized_tool_errors():
+    async def _test():
+        server = create_mcp_server()
+        with pytest.raises(ToolError) as exc_info:
+            await server.call_tool("magy_run_status", {"run_id": "missing"})
+
+        message = str(exc_info.value)
+        assert "Run status is unavailable" in message
+        assert "/" not in message
+
+    asyncio.run(_test())
+
+
+def test_mcp_transport_marks_sanitized_tool_errors():
+    async def _test():
+        async with Client(create_mcp_server()) as client:
+            result = await client.call_tool("magy_run_status", {"run_id": "missing"})
+
+        assert result.is_error is True
+        assert "Run status is unavailable" in result.content[0].text
+        assert "/" not in result.content[0].text
+
+    asyncio.run(_test())
+
+
+def test_mcp_stdio_worker_survives_server_restart(fake_agy, monkeypatch):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    monkeypatch.setenv("FAKE_AGY_MODE", "sleep")
+    add_profile("mcp-restart-p", kind="managed")
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "magy.mcp_server"],
+        env=dict(os.environ),
+    )
+
+    async def _test():
+        async with Client(params) as first_client:
+            started = await first_client.call_tool(
+                "magy_run_start",
+                {
+                    "prompt": "Restart survival",
+                    "profile": "mcp-restart-p",
+                    "timeout": 0.5,
+                },
+            )
+            assert started.is_error is False
+            run_id = started.structured_content["run_id"]
+            assert started.structured_content["status"] in {"queued", "running"}
+
+        async with Client(params) as second_client:
+            status_result = await second_client.call_tool(
+                "magy_run_status", {"run_id": run_id}
+            )
+            assert status_result.is_error is False
+            waited = await second_client.call_tool(
+                "magy_run_wait",
+                {"run_id": run_id, "timeout": 5.0},
+            )
+            assert waited.is_error is False
+            assert waited.structured_content["status"] == "timed_out"
+            result = await second_client.call_tool(
+                "magy_run_result", {"run_id": run_id}
+            )
+            assert result.is_error is False
+            assert result.structured_content["eof"] is True
+
+    asyncio.run(_test())
+
+
+def test_mcp_stdio_stdout_contains_only_jsonrpc(tmp_path):
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "magy-test", "version": "1"},
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        },
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    input_text = "".join(json.dumps(message) + "\n" for message in messages)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "magy.mcp_server"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ),
+    )
+    stdout, stderr = proc.communicate(input=input_text, timeout=10.0)
+
+    assert proc.returncode == 0, stderr
+    lines = [line for line in stdout.splitlines() if line]
+    assert lines
+    response_ids = set()
+    for line in lines:
+        message = json.loads(line)
+        assert message.get("jsonrpc") == "2.0"
+        if "id" in message:
+            response_ids.add(message["id"])
+    assert {1, 2}.issubset(response_ids)
 
 
 def test_mcp_server_restart_survival():

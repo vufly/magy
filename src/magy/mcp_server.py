@@ -1,22 +1,112 @@
+import asyncio
 import sys
-from typing import Any
+import time
+from dataclasses import dataclass
+from typing import Annotated, NoReturn
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import Field, StrictBool
 
 from magy.profiles import load_profiles
 from magy.routing import get_routing_status
 from magy.runs import (
+    MAX_RESULT_CHUNK_BYTES,
+    MIN_RESULT_CHUNK_BYTES,
+    TERMINAL_STATUSES,
+    RunResult,
+    RunStatus,
     cancel_run,
     get_run_result,
     get_run_status,
     start_run,
-    wait_run,
 )
+
+
+class StrictMCPServer(MCPServer):
+    async def list_tools(self):
+        tools = await super().list_tools()
+        for tool in tools:
+            tool.input_schema = {
+                **tool.input_schema,
+                "additionalProperties": False,
+            }
+        return tools
+
+    async def call_tool(self, name, arguments, context=None):
+        tool = next(
+            (
+                candidate
+                for candidate in await self.list_tools()
+                if candidate.name == name
+            ),
+            None,
+        )
+        if tool is not None:
+            allowed = set(tool.input_schema.get("properties", {}))
+            if set(arguments) - allowed:
+                raise ToolError("Unknown tool input property")
+
+        for field in ("auto_approval", "sandbox"):
+            if (
+                field in arguments
+                and arguments[field] is not None
+                and type(arguments[field]) is not bool
+            ):
+                raise ToolError(f"{field} must be a boolean")
+        if "timeout" in arguments and arguments["timeout"] is not None:
+            if type(arguments["timeout"]) not in (int, float):
+                raise ToolError("timeout must be a number")
+        for field in ("offset", "limit"):
+            if field in arguments and type(arguments[field]) is not int:
+                raise ToolError(f"{field} must be an integer")
+        if "additional_dirs" in arguments and arguments["additional_dirs"] is not None:
+            directories = arguments["additional_dirs"]
+            if not isinstance(directories, list) or any(
+                not isinstance(directory, str) for directory in directories
+            ):
+                raise ToolError("additional_dirs must be an array of strings")
+
+        return await super().call_tool(name, arguments, context)
+
+
+@dataclass
+class PublicProfile:
+    name: str
+    kind: str
+    enabled: bool
+    health: str
+    available: bool
+    cooldown_until: float | None
+    cooldown_reason: str | None
+    last_selected_at: float | None
+    last_success_at: float | None
+    last_failure_at: float | None
+
+
+@dataclass
+class RoutingSummary:
+    cursor: str | None
+    total_profiles: int
+    enabled_profiles: int
+    healthy_profiles: int
+    untested_profiles: int
+    cooldown_profiles: int
+
+
+@dataclass
+class ProfilesResponse:
+    profiles: list[PublicProfile]
+    routing: RoutingSummary
+
+
+def _raise_tool_error(message: str, exc: Exception) -> NoReturn:
+    raise ToolError(message) from exc
 
 
 def create_mcp_server() -> MCPServer:
     """Create and configure the Magy MCP server with all delegation tools."""
-    server = MCPServer("magy")
+    server = StrictMCPServer("magy")
 
     @server.tool(
         name="magy_run_start",
@@ -28,23 +118,24 @@ def create_mcp_server() -> MCPServer:
             "confirmation is strictly required for tool actions (note: headless "
             "runs may fail if interaction is required)."
         ),
+        structured_output=True,
     )
     def handle_magy_run_start(
-        prompt: str,
+        prompt: Annotated[str, Field(min_length=1)],
         workspace: str | None = None,
         profile: str | None = None,
         model: str | None = None,
         agent: str | None = None,
         effort: str | None = None,
         mode: str | None = None,
-        timeout: float | None = None,
-        sandbox: bool | None = None,
+        timeout: Annotated[float | None, Field(gt=0)] = None,
+        sandbox: StrictBool | None = None,
         additional_dirs: list[str] | None = None,
-        auto_approval: bool = True,
+        auto_approval: StrictBool = True,
         idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> RunStatus:
         try:
-            status = start_run(
+            return start_run(
                 prompt=prompt,
                 workspace=workspace,
                 profile=profile,
@@ -58,9 +149,8 @@ def create_mcp_server() -> MCPServer:
                 auto_approval=auto_approval,
                 idempotency_key=idempotency_key,
             )
-            return status.to_dict()
-        except Exception as e:
-            return {"error": str(e), "status": "failed"}
+        except Exception as exc:
+            _raise_tool_error("Run could not be started", exc)
 
     @server.tool(
         name="magy_run_wait",
@@ -69,16 +159,20 @@ def create_mcp_server() -> MCPServer:
             "its current status. Clamped to safe MCP timeout limits (0.1s to 60s) "
             "to prevent gateway timeouts."
         ),
+        structured_output=True,
     )
-    def handle_magy_run_wait(
-        run_id: str,
-        timeout: float = 20.0,
-    ) -> dict[str, Any]:
+    async def handle_magy_run_wait(run_id: str, timeout: float = 20.0) -> RunStatus:
         try:
-            status = wait_run(run_id, timeout=timeout)
-            return status.to_dict()
-        except Exception as e:
-            return {"error": str(e), "run_id": run_id, "status": "failed"}
+            clamped_timeout = max(0.1, min(float(timeout), 60.0))
+            deadline = time.monotonic() + clamped_timeout
+            while time.monotonic() < deadline:
+                status = await asyncio.to_thread(get_run_status, run_id)
+                if status.status in TERMINAL_STATUSES:
+                    return status
+                await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+            return await asyncio.to_thread(get_run_status, run_id)
+        except Exception as exc:
+            _raise_tool_error("Run could not be waited", exc)
 
     @server.tool(
         name="magy_run_status",
@@ -86,42 +180,34 @@ def create_mcp_server() -> MCPServer:
             "Get the current status of an execution run. Omits prompt, raw "
             "command arguments, and credential paths."
         ),
+        structured_output=True,
     )
-    def handle_magy_run_status(
-        run_id: str,
-    ) -> dict[str, Any]:
+    def handle_magy_run_status(run_id: str) -> RunStatus:
         try:
-            status = get_run_status(run_id)
-            return status.to_dict()
-        except Exception as e:
-            return {"error": str(e), "run_id": run_id, "status": "failed"}
+            return get_run_status(run_id)
+        except Exception as exc:
+            _raise_tool_error("Run status is unavailable", exc)
 
     @server.tool(
         name="magy_run_result",
         description=(
-            "Retrieve bounded output chunks with stable byte offsets from an "
-            "execution run's stdout log."
+            "Retrieve bounded UTF-8 output chunks with stable byte offsets from an "
+            "execution run's stdout log. Maximum chunk size is 1 MiB."
         ),
+        structured_output=True,
     )
     def handle_magy_run_result(
         run_id: str,
-        offset: int = 0,
-        limit: int = 65536,
-    ) -> dict[str, Any]:
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[
+            int,
+            Field(ge=MIN_RESULT_CHUNK_BYTES, le=MAX_RESULT_CHUNK_BYTES),
+        ] = 65536,
+    ) -> RunResult:
         try:
-            res = get_run_result(run_id, offset=offset, limit=limit)
-            return res.to_dict()
-        except Exception as e:
-            return {
-                "error": str(e),
-                "run_id": run_id,
-                "status": "failed",
-                "content": "",
-                "offset": offset,
-                "next_offset": offset,
-                "eof": True,
-                "is_json": False,
-            }
+            return get_run_result(run_id, offset=offset, limit=limit)
+        except Exception as exc:
+            _raise_tool_error("Run result is unavailable", exc)
 
     @server.tool(
         name="magy_run_cancel",
@@ -129,33 +215,48 @@ def create_mcp_server() -> MCPServer:
             "Cancel a running or queued execution run, terminating its entire "
             "process tree."
         ),
+        structured_output=True,
     )
-    def handle_magy_run_cancel(
-        run_id: str,
-    ) -> dict[str, Any]:
+    def handle_magy_run_cancel(run_id: str) -> RunStatus:
         try:
-            status = cancel_run(run_id)
-            return status.to_dict()
-        except Exception as e:
-            return {"error": str(e), "run_id": run_id, "status": "failed"}
+            return cancel_run(run_id)
+        except Exception as exc:
+            _raise_tool_error("Run could not be cancelled", exc)
 
     @server.tool(
         name="magy_profiles",
         description=(
             "List all registered profiles, their health, cooldowns, and availability, "
-            "along with round-robin routing status."
+            "along with round-robin routing status. Private home paths and internal "
+            "incarnation identifiers are omitted."
         ),
+        structured_output=True,
     )
-    def handle_magy_profiles() -> dict[str, Any]:
+    def handle_magy_profiles() -> ProfilesResponse:
         try:
             profiles = load_profiles()
             routing = get_routing_status()
-            return {
-                "profiles": [p.to_dict() for p in profiles.values()],
-                "routing": routing,
-            }
-        except Exception as e:
-            return {"error": str(e), "profiles": [], "routing": {}}
+            now = time.time()
+            return ProfilesResponse(
+                profiles=[
+                    PublicProfile(
+                        name=profile.name,
+                        kind=profile.kind,
+                        enabled=profile.enabled,
+                        health=profile.health,
+                        available=profile.is_available(now),
+                        cooldown_until=profile.cooldown_until,
+                        cooldown_reason=profile.cooldown_reason,
+                        last_selected_at=profile.last_selected_at,
+                        last_success_at=profile.last_success_at,
+                        last_failure_at=profile.last_failure_at,
+                    )
+                    for profile in profiles.values()
+                ],
+                routing=RoutingSummary(**routing),
+            )
+        except Exception as exc:
+            _raise_tool_error("Profiles are unavailable", exc)
 
     return server
 

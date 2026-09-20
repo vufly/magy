@@ -11,6 +11,8 @@ dependencies = [
     "filelock>=4.0.0",
     "mcp>=2.2.0",
     "platformdirs>=4.11.10",
+    "psutil>=7.0.0",
+    "pydantic>=2.13.0",
 ]
 
 [project.scripts]

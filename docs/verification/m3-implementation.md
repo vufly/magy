@@ -45,16 +45,28 @@ and six core MCP tools.
 
 ### M3-S3: Cancellation and Timeout
 - Cross-process tree termination implemented in `_terminate_pid_tree` (`src/magy/runs.py`):
-  - Graceful `SIGTERM` sent to child process group (`os.killpg` on POSIX, `taskkill /F /T` on Windows).
-  - Grace period wait (1.0s).
-  - Bounded escalation to `SIGKILL` if processes remain alive.
-  - On Linux, checks `/proc/<pid>/environ` for `MAGY_RUN_ID=<run_id>` marker to avoid targeting recycled/reused PIDs.
+  - Uses `psutil` recursive process discovery plus `MAGY_RUN_ID` environment markers.
+  - Verifies PID creation time and run marker before signalling stored identities.
+  - Graceful termination is followed by bounded forced termination with descendant rescans.
+  - Detects detached, double-forked, and `setsid()` descendants through inherited run markers.
 - Timeout execution:
   - If execution exceeds `request.timeout`, process tree is terminated, run transitions to `timed_out`, and profile health transitions to `timeout`.
 - Cancellation via `cancel_run`:
-  - Terminates child process tree and worker process.
-  - Sets durable terminal state `cancelled`.
+  - Uses restart-recoverable `cancelling` state while process cleanup is active.
+  - Terminates queued workers or child process trees without trusting stale PIDs.
+  - Sets durable terminal state `cancelled` after cleanup.
   - Subsequent cancellations return terminal status without re-running cancellation logic.
+
+### Final Independent Review Remediation
+
+- Made idempotency reservation and worker claim atomic.
+- Made child spawn and PID/create-time publication cancellation-safe under run lock.
+- Added stale worker reconciliation and controlled spawn/bootstrap failure states.
+- Added restart-recoverable cancellation and durable cleanup retry metadata.
+- Added typed strict MCP schemas, sanitized `ToolError` responses, and safe profile output.
+- Added bounded UTF-8-safe result chunks with stable byte offsets.
+- Added real stdio server restart, stdout protocol-purity, concurrency, PID-reuse,
+  descendant cleanup, and lifecycle-race regressions.
 
 ### M3-S4: MCP Tools
 - Implemented MCP Server in `src/magy/mcp_server.py` using `mcp.server.mcpserver.MCPServer`:
@@ -82,13 +94,13 @@ and six core MCP tools.
 
 | Test Suite | Result | Details |
 | --- | --- | --- |
-| `tests/test_runs.py` | PASS (10 tests) | Run persistence before spawn, idempotency mapping and reuse, prompt omission in status, bounded result chunks with offsets, JSON detection, parameter validation, cancellation, wait short-poll, retryable alternate suggestion |
-| `tests/test_worker.py` | PASS (5 tests) | Successful worker run, round-robin profile selection, failure classification and health update, timeout termination, missing executable failure handling |
-| `tests/test_mcp_server.py` | PASS (6 tests) | Tool listing and description checks, run start and status, run result and wait, run cancel, profile listing, server restart survival (fresh server recovering state from disk) |
-| Full test suite (`pytest`) | PASS (243 tests) | All M0, M1, M2, and M3 tests passing on Linux (Python 3.14.7) |
-| Min Python suite (`--python 3.11`) | PASS (243 tests) | All tests passing on Linux (Python 3.11.16) |
+| `tests/test_runs.py` | PASS (34 tests) | Atomic idempotency and claims, durable reconciliation, bounded UTF-8 chunks, cancellation recovery, PID identity, detached descendants, and cleanup retry |
+| `tests/test_worker.py` | PASS (13 tests) | Success/failure health, profile incarnation, capability gating, timeout/cancellation races, descendant cleanup, and terminal ordering |
+| `tests/test_mcp_server.py` | PASS (12 tests) | Strict schemas, sanitized errors, typed tools, safe profiles, stdio protocol purity, and real server-process restart survival |
+| Full test suite (`pytest`) | PASS (281 tests) | All M0, M1, M2, and M3 tests passing on Linux (Python 3.14.7) |
+| Min Python suite (`--python 3.11`) | PASS (281 tests) | All tests passing on Linux (Python 3.11.16) |
 | Ruff lint (`ruff check .`) | PASS | 0 errors across whole repository |
-| Ruff format (`ruff format --check .`) | PASS | 52 files formatted |
+| Ruff format (`ruff format --check .`) | PASS | 54 files formatted |
 | Package build (`uv build`) | PASS | Wheel and source tarball built successfully |
 | Tool install (`uv tool install --force .`) | PASS | Installed `magy` and `magy-mcp` globally |
 
@@ -114,5 +126,6 @@ and six core MCP tools.
 
 ## 5. Known Limitations & Next Milestone Prerequisites
 
-- Detached process PID marker verification uses `/proc/<pid>/environ` on Linux; on non-Linux POSIX platforms, process group and process existence checks are used.
+- Detached process identity and descendant discovery use `psutil` creation times,
+  recursive children, and inherited `MAGY_RUN_ID` environment markers.
 - Full cross-platform verification for native Windows process group creation and macOS job control is scheduled for Milestone 4 (Hardening and Release).

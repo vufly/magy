@@ -274,6 +274,19 @@ def main() -> int:
             except Exception:
                 pass
 
+    if mode == "spawn_child_exit":
+        child_env = dict(os.environ)
+        child_env["FAKE_AGY_MODE"] = "sleep"
+        child_proc = subprocess.Popen(
+            [sys.executable, "-m", "magy.testing.fake_agy"],
+            env=child_env,
+        )
+        child_pid_file = os.environ.get("FAKE_AGY_CHILD_PID_FILE")
+        if child_pid_file:
+            Path(child_pid_file).write_text(str(child_proc.pid))
+        print("Fake Agy: parent completed after spawning child.")
+        return 0
+
     if mode == "custom":
         stdout_msg = os.environ.get("FAKE_AGY_STDOUT")
         stderr_msg = os.environ.get("FAKE_AGY_STDERR")
