@@ -263,6 +263,14 @@ def create_mcp_server() -> MCPServer:
 
 def main(argv: list[str] | None = None) -> int:
     """Run Magy MCP server with stdio transport."""
+    if argv is None:
+        argv = sys.argv[1:]
+    if "-h" in argv or "--help" in argv:
+        print("Usage: magy-mcp")
+        print()
+        print("Run the Magy Model Context Protocol (MCP) server over stdio.")
+        return 0
+
     server = create_mcp_server()
     try:
         server.run(transport="stdio")

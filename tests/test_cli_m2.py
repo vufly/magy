@@ -267,3 +267,23 @@ def test_profile_create_handles_pending_removal_cleanup(monkeypatch, capsys):
 
     assert main(["profile", "create", "pending-p"]) == 1
     assert "pending removal cleanup" in capsys.readouterr().err
+
+
+def test_passthrough_short_profile_flags(fake_agy, monkeypatch, capsys):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    add_profile("flag-p", kind="managed")
+
+    # -p <name> -- <cmd>
+    assert main(["-p", "flag-p", "--", "models"]) == 0
+    err = capsys.readouterr().err
+    assert "[magy] using profile: flag-p" in err
+
+    # -p=<name> <cmd>
+    assert main(["-p=flag-p", "models"]) == 0
+    err = capsys.readouterr().err
+    assert "[magy] using profile: flag-p" in err
+
+    # -p<name> <cmd>
+    assert main(["-pflag-p", "models"]) == 0
+    err = capsys.readouterr().err
+    assert "[magy] using profile: flag-p" in err

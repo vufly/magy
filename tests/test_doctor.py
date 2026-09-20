@@ -2,7 +2,18 @@ import json
 
 import pytest
 
+from magy.agy import evaluate_agy_compatibility
 from magy.cli import main
+
+
+def test_evaluate_agy_compatibility():
+    assert "verified" in evaluate_agy_compatibility("1.2.6")
+    assert "verified" in evaluate_agy_compatibility("v1.2.6")
+    assert "verified" in evaluate_agy_compatibility("1.1.0")
+    assert "verified" in evaluate_agy_compatibility("1.0.4")
+    assert "unverified" in evaluate_agy_compatibility("2.0.0")
+    assert "unverified" in evaluate_agy_compatibility("unknown")
+    assert "unverified" in evaluate_agy_compatibility(None)
 
 
 def test_doctor_healthy(fake_agy, monkeypatch, capsys):
@@ -16,12 +27,35 @@ def test_doctor_healthy(fake_agy, monkeypatch, capsys):
     assert "Magy Diagnostics" in captured.out
     assert "Status: OK - all prerequisites satisfied." in captured.out
     assert "1.2.6" in captured.out
+    assert (
+        "Compatibility: verified (1.2.6 tested with profile isolation)" in captured.out
+    )
     assert str(fake_agy.executable.resolve()) in captured.out
 
     # Ensure no credential or token terms appear
     assert "token" not in captured.out.lower()
     assert "credential" not in captured.out.lower()
     assert "secret" not in captured.out.lower()
+
+
+def test_doctor_unverified_version(fake_agy, monkeypatch, capsys):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    monkeypatch.setenv("FAKE_AGY_VERSION", "2.1.0")
+
+    ret = main(["doctor"])
+    assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "Magy Diagnostics" in captured.out
+    assert "Status: OK - all prerequisites satisfied." in captured.out
+    assert "2.1.0" in captured.out
+    assert "Compatibility: unverified (2.1.0 not verified" in captured.out
+
+    ret_json = main(["doctor", "--json"])
+    assert ret_json == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["healthy"] is True
+    assert "unverified (2.1.0 not verified" in data["agy"]["compatibility"]
 
 
 def test_doctor_missing_executable(monkeypatch, capsys):
@@ -46,6 +80,9 @@ def test_doctor_json_healthy(fake_agy, monkeypatch, capsys):
     data = json.loads(captured.out)
     assert data["healthy"] is True
     assert data["agy"]["version"] == "1.2.6"
+    assert (
+        data["agy"]["compatibility"] == "verified (1.2.6 tested with profile isolation)"
+    )
     assert data["agy"]["executable"] == str(fake_agy.executable.resolve())
     assert len(data["missing_prerequisites"]) == 0
 
@@ -59,6 +96,7 @@ def test_doctor_json_unhealthy(monkeypatch, capsys):
     captured = capsys.readouterr()
     data = json.loads(captured.out)
     assert data["healthy"] is False
+    assert data["agy"]["compatibility"] is None
     assert len(data["missing_prerequisites"]) > 0
 
 

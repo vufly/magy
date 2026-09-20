@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 from mcp import Client, StdioServerParameters
@@ -270,7 +271,6 @@ def test_mcp_stdio_stdout_contains_only_jsonrpc(tmp_path):
         },
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
     ]
-    input_text = "".join(json.dumps(message) + "\n" for message in messages)
     proc = subprocess.Popen(
         [sys.executable, "-m", "magy.mcp_server"],
         stdin=subprocess.PIPE,
@@ -279,17 +279,33 @@ def test_mcp_stdio_stdout_contains_only_jsonrpc(tmp_path):
         text=True,
         env=dict(os.environ),
     )
-    stdout, stderr = proc.communicate(input=input_text, timeout=10.0)
+    for message in messages:
+        proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
 
-    assert proc.returncode == 0, stderr
-    lines = [line for line in stdout.splitlines() if line]
-    assert lines
     response_ids = set()
-    for line in lines:
+    lines = []
+    start_time = time.time()
+    while time.time() - start_time < 10.0:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        lines.append(line)
         message = json.loads(line)
         assert message.get("jsonrpc") == "2.0"
         if "id" in message:
             response_ids.add(message["id"])
+        if {1, 2}.issubset(response_ids):
+            break
+
+    proc.stdin.close()
+    proc.wait(timeout=5.0)
+
+    assert proc.returncode == 0
+    assert lines
     assert {1, 2}.issubset(response_ids)
 
 
@@ -326,3 +342,17 @@ def test_mcp_server_restart_survival():
         assert res_data["eof"] is True
 
     asyncio.run(_test())
+
+
+def test_mcp_server_help_flag(capsys):
+    from magy.mcp_server import main as mcp_main
+
+    ret = mcp_main(["--help"])
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "Usage: magy-mcp" in captured.out
+
+    ret2 = mcp_main(["-h"])
+    assert ret2 == 0
+    captured2 = capsys.readouterr()
+    assert "Usage: magy-mcp" in captured2.out

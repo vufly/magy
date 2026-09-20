@@ -267,6 +267,25 @@ def get_agy_capabilities(
         return default_caps
 
 
+VERIFIED_AGY_PREFIXES = ("1.2.", "1.1.", "1.0.")
+
+
+def evaluate_agy_compatibility(version_str: str | None) -> str:
+    """Evaluate compatibility status of an Agy version without asserting safety."""
+    if not version_str or version_str == "unknown":
+        return (
+            "unverified (unknown version; undocumented storage or keyring changes "
+            "may break profile isolation)"
+        )
+    v_clean = version_str.strip().lstrip("vV")
+    if any(v_clean.startswith(prefix) for prefix in VERIFIED_AGY_PREFIXES):
+        return f"verified ({version_str} tested with profile isolation)"
+    return (
+        f"unverified ({version_str} not verified; undocumented storage or keyring "
+        "changes may break profile isolation)"
+    )
+
+
 @dataclass
 class AgyDiagnostics:
     magy_version: str
@@ -282,6 +301,7 @@ class AgyDiagnostics:
     missing_prerequisites: list[str]
     rejected_candidate: Path | None = None
     resolver_cmd: list[str] | None = None
+    compatibility_note: str | None = None
 
     @property
     def is_healthy(self) -> bool:
@@ -375,6 +395,9 @@ def collect_diagnostics() -> AgyDiagnostics:
         missing_prerequisites=missing,
         rejected_candidate=rejected_candidate,
         resolver_cmd=cfg.agy_resolver,
+        compatibility_note=(
+            evaluate_agy_compatibility(agy_ver) if exe is not None else None
+        ),
     )
 
 

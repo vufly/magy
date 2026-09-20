@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "-p",
         "--profile",
         dest="profile",
         metavar="NAME",
@@ -153,6 +154,7 @@ def run_doctor(args: argparse.Namespace) -> int:
                 "executable": str(diag.executable) if diag.executable else None,
                 "discovery_source": diag.discovery_source,
                 "version": diag.agy_version,
+                "compatibility": diag.compatibility_note,
             },
             "healthy": diag.is_healthy,
             "missing_prerequisites": diag.missing_prerequisites,
@@ -178,6 +180,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     if diag.executable:
         print(f"  Executable:    {diag.executable} (via {diag.discovery_source})")
         print(f"  Version:       {diag.agy_version or 'unknown'}")
+        if diag.compatibility_note:
+            print(f"  Compatibility: {diag.compatibility_note}")
     else:
         print(f"  Executable:    NOT FOUND ({diag.discovery_source})")
     print()
@@ -476,7 +480,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if post_args is not None:
         pre_parser = argparse.ArgumentParser(prog="magy", add_help=False)
-        pre_parser.add_argument("--profile", dest="profile")
+        pre_parser.add_argument("-p", "--profile", dest="profile")
         try:
             pre_args_parsed, pre_remaining = pre_parser.parse_known_args(pre_args)
         except SystemExit:
@@ -488,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("argument --profile: cannot be empty")
         agy_args = list(post_args)
     else:
-        if argv[0] == "--profile":
+        if argv[0] in ("-p", "--profile"):
             if len(argv) < 2:
                 parser.error("argument --profile: expected one argument")
             if argv[1] == "--":
@@ -501,6 +505,14 @@ def main(argv: list[str] | None = None) -> int:
             target_profile = argv[0].split("=", 1)[1]
             if not target_profile:
                 parser.error("argument --profile: cannot be empty")
+            agy_args = argv[1:]
+        elif argv[0].startswith("-p="):
+            target_profile = argv[0].split("=", 1)[1]
+            if not target_profile:
+                parser.error("argument --profile: cannot be empty")
+            agy_args = argv[1:]
+        elif argv[0].startswith("-p") and len(argv[0]) > 2:
+            target_profile = argv[0][2:]
             agy_args = argv[1:]
         else:
             agy_args = list(argv)
