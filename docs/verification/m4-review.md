@@ -56,7 +56,7 @@ Neither `set-current` nor `current` existed as profile subcommands. Actual subco
 ### M4-S4: User Documentation
 - README overhauled from 17-line scaffold to full product guide.
 - Installation (`uv tool install`), profile flows, round-robin + explicit `-p`, cooldown (correctly states 60s default), MCP setup for Codex and OpenCode, synthetic HOME caveat, and provider disclaimer all present.
-- **Minor:** The non-existent `set-current` / `current` commands (L1 above) must be removed.
+- ~~Non-existent `set-current` / `current` commands (L1)~~ — remediated; replaced with `magy profile show <name>`.
 
 ### M4-S5: Compatibility Report & Doctor
 - `evaluate_agy_compatibility()` correctly prefix-matches on `"1.2."`, `"1.1."`, `"1.0."` — avoids false positives like `1.20.0` (correctly unverified) and handles `v`-prefixed versions.
