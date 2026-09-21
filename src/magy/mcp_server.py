@@ -89,6 +89,7 @@ class RoutingSummary:
     cursor: str | None
     total_profiles: int
     enabled_profiles: int
+    available_profiles: int
     healthy_profiles: int
     untested_profiles: int
     cooldown_profiles: int

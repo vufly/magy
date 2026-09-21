@@ -148,6 +148,7 @@ def get_routing_status() -> dict[str, Any]:
     now = time.time()
     total = len(profiles)
     enabled = sum(1 for p in profiles.values() if p.enabled)
+    available = sum(1 for p in profiles.values() if p.is_available(now))
     healthy = sum(1 for p in profiles.values() if p.enabled and p.health == "healthy")
     untested = sum(1 for p in profiles.values() if p.enabled and p.health == "untested")
     cooldown = sum(
@@ -160,6 +161,7 @@ def get_routing_status() -> dict[str, Any]:
         "cursor": routing_state.get("cursor"),
         "total_profiles": total,
         "enabled_profiles": enabled,
+        "available_profiles": available,
         "healthy_profiles": healthy,
         "untested_profiles": untested,
         "cooldown_profiles": cooldown,

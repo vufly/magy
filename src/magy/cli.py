@@ -442,19 +442,22 @@ def run_status(args: argparse.Namespace) -> int:
 
     print("Magy Status")
     print("===========")
-    print(f"Total Profiles:    {status['total_profiles']}")
-    print(f"Enabled Profiles:  {status['enabled_profiles']}")
-    print(f"Healthy Profiles:  {status['healthy_profiles']}")
-    print(f"Untested Profiles: {status['untested_profiles']}")
-    print(f"In Cooldown:       {status['cooldown_profiles']}")
-    print(f"Current Cursor:    {status['cursor'] or 'none'}")
+    print(f"Total Profiles:     {status['total_profiles']}")
+    print(f"Enabled Profiles:   {status['enabled_profiles']}")
+    print(f"Available Profiles: {status['available_profiles']}")
+    print(f"Healthy Profiles:   {status['healthy_profiles']}")
+    print(f"Untested Profiles:  {status['untested_profiles']}")
+    print(f"In Cooldown:        {status['cooldown_profiles']}")
+    print(f"Current Cursor:     {status['cursor'] or 'none'}")
     return 0
 
 
 def format_cooldown(cooldown_until: float | None, reason: str | None) -> str:
     if cooldown_until is None:
         return "-"
-    remaining = max(0.0, cooldown_until - time.time())
+    remaining = cooldown_until - time.time()
+    if remaining <= 0:
+        return "-"
     reason_str = f" ({reason})" if reason else ""
     return f"{remaining:.0f}s remaining{reason_str}"
 
@@ -593,9 +596,10 @@ def handle_profile_command(
             print(f"  Kind:             {p.kind}")
             print(f"  Home:             {p.resolved_home()}")
             print(f"  Enabled:          {'yes' if p.enabled else 'no'}")
+            print(f"  Available:        {'yes' if p.is_available() else 'no'}")
             print(f"  Health:           {p.health}")
-            if p.cooldown_until:
-                cd_str = format_cooldown(p.cooldown_until, p.cooldown_reason)
+            cd_str = format_cooldown(p.cooldown_until, p.cooldown_reason)
+            if cd_str != "-":
                 print(f"  Cooldown:         {cd_str}")
             if p.last_selected_at:
                 print(f"  Last Selected:    {time.ctime(p.last_selected_at)}")
