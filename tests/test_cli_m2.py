@@ -287,3 +287,128 @@ def test_passthrough_short_profile_flags(fake_agy, monkeypatch, capsys):
     assert main(["-pflag-p", "models"]) == 0
     err = capsys.readouterr().err
     assert "[magy] using profile: flag-p" in err
+
+
+def test_cli_top_level_help(capfd):
+    for flag in (["--help"], ["-h"], ["help"], []):
+        ret = main(flag)
+        assert ret == 0
+        out = capfd.readouterr().out
+        assert "usage: magy" in out
+        assert "Commands & Modes:" in out
+        assert "Examples:" in out
+        assert "doctor" in out
+        assert "status" in out
+        assert "profile" in out
+        assert "help" in out
+
+
+def test_cli_doctor_help(capfd):
+    for flag in (
+        ["doctor", "--help"],
+        ["doctor", "-h"],
+        ["doctor", "help"],
+        ["help", "doctor"],
+    ):
+        ret = main(flag)
+        assert ret == 0
+        out = capfd.readouterr().out
+        assert "usage: magy doctor" in out
+        assert "--json" in out
+        assert "Examples:" in out
+
+
+def test_cli_status_help(capfd):
+    for flag in (
+        ["status", "--help"],
+        ["status", "-h"],
+        ["status", "help"],
+        ["help", "status"],
+    ):
+        ret = main(flag)
+        assert ret == 0
+        out = capfd.readouterr().out
+        assert "usage: magy status" in out
+        assert "--json" in out
+        assert "Examples:" in out
+
+
+def test_cli_profile_help(capfd):
+    for flag in (
+        ["profile", "--help"],
+        ["profile", "-h"],
+        ["profile", "help"],
+        ["help", "profile"],
+        ["profile"],
+    ):
+        ret = main(flag)
+        assert ret == 0
+        out = capfd.readouterr().out
+        assert "usage: magy profile" in out
+        assert "Profile Actions:" in out
+        assert "add" in out
+        assert "auth" in out
+        assert "list" in out
+        assert "show" in out
+        assert "remove" in out
+        assert "Examples:" in out
+
+
+def test_cli_profile_subactions_help(capfd):
+    actions = [
+        ("add", ["--current", "name"]),
+        ("create", ["name"]),
+        ("auth", ["name"]),
+        ("run", ["name"]),
+        ("list", ["--json"]),
+        ("show", ["name", "--json"]),
+        ("enable", ["name"]),
+        ("disable", ["name"]),
+        ("reset-health", ["name"]),
+        ("remove", ["name", "--force"]),
+    ]
+    for action, expected_terms in actions:
+        for flag in (
+            ["profile", action, "--help"],
+            ["profile", action, "-h"],
+            ["profile", "help", action],
+            ["help", "profile", action],
+            ["profile", action, "help"],
+        ):
+            ret = main(flag)
+            assert ret == 0, f"Failed for flag: {flag}"
+            out = capfd.readouterr().out
+            assert f"usage: magy profile {action}" in out, (
+                f"Missing usage for flag: {flag}"
+            )
+            assert "Examples:" in out
+            for term in expected_terms:
+                assert term in out, f"Missing term '{term}' for flag: {flag}"
+
+
+def test_cli_help_unknown_topic(capfd):
+    ret = main(["help", "unknown"])
+    assert ret == 2
+    err = capfd.readouterr().err
+    assert "unknown help topic 'unknown'" in err
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["help", "profile", "unknown"])
+    assert exc_info.value.code == 2
+
+
+def test_cli_misplaced_help_rejected():
+    with pytest.raises(SystemExit) as exc_info:
+        main(["-p", "work", "help"])
+    assert exc_info.value.code == 2
+
+
+def test_cli_passthrough_help_forwarded(fake_agy, monkeypatch, capsys):
+    monkeypatch.setenv("MAGY_AGY_CMD", str(fake_agy.executable))
+    add_profile("help-fw-p", kind="managed")
+
+    assert main(["-p", "help-fw-p", "--", "help"]) == 0
+    inv = fake_agy.get_invocations()
+    assert len(inv) == 1
+    assert inv[0]["args"][0] == "help"
+    assert "--log-file" in inv[0]["args"]

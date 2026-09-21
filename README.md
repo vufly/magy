@@ -109,6 +109,26 @@ Inspect details and health for a specific profile:
 magy profile show work
 ```
 
+#### Getting Help
+
+Magy provides comprehensive command documentation and examples at every level:
+
+```bash
+# Top-level help and available commands:
+magy help
+magy --help
+
+# Subcommand help:
+magy help profile
+magy help doctor
+magy help status
+
+# Deeper action help:
+magy help profile add
+magy profile add --help
+magy profile help auth
+```
+
 ---
 
 ## Routing and Cooldown Semantics

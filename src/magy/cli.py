@@ -8,18 +8,51 @@ from magy.agy import collect_diagnostics
 
 
 def build_parser() -> argparse.ArgumentParser:
+    fmt = argparse.RawDescriptionHelpFormatter
     parser = argparse.ArgumentParser(
         prog="magy",
         description=(
-            "Magy: Multi-profile launcher and orchestrator for Antigravity (agy)."
+            "Magy: Multi-profile launcher and orchestrator for Antigravity (agy).\n\n"
+            "Routes Antigravity CLI commands across isolated profiles (~/.gemini)\n"
+            "using round-robin selection or explicit profile targeting (-p).\n"
+            "Tracks profile health, enforces cooldown backoff, and ensures zero\n"
+            "credential leakage to or from the host environment."
         ),
+        epilog=(
+            "Commands & Modes:\n"
+            "  magy [OPTIONS] [COMMAND...]     Run agy with automatic round-robin\n"
+            "  magy -p <name> [COMMAND...]     Run agy with an explicit profile\n"
+            "  magy [OPTIONS] -- [AGY_ARGS...] Forward arguments directly to agy\n"
+            "  magy <subcommand> [OPTIONS]     Execute a Magy management command\n\n"
+            "Examples:\n"
+            "  # Run agy with automatic round-robin profile selection:\n"
+            '  magy "Analyze performance in src/"\n'
+            "  magy -- pytest -q\n\n"
+            "  # Run agy with an explicit profile:\n"
+            '  magy -p work "Refactor user authentication"\n'
+            "  magy --profile=personal -- git status\n\n"
+            "  # Check environment prerequisites and health:\n"
+            "  magy doctor\n\n"
+            "  # View profiles and routing health overview:\n"
+            "  magy status\n\n"
+            "  # Manage and inspect profiles:\n"
+            "  magy profile list\n"
+            "  magy profile show work\n"
+            "  magy profile add work\n"
+            "  magy profile auth work\n\n"
+            "  # View detailed help for any subcommand:\n"
+            "  magy help profile\n"
+            "  magy profile add --help\n"
+            "  magy help doctor"
+        ),
+        formatter_class=fmt,
     )
     parser.add_argument(
         "-p",
         "--profile",
         dest="profile",
         metavar="NAME",
-        help="Target profile name for command execution.",
+        help="Target profile name for command execution (overrides round-robin).",
     )
     parser.add_argument(
         "--version",
@@ -33,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Check environment, executable discovery, and prerequisites.",
+        description=(
+            "Check environment, executable discovery, and prerequisites.\n\n"
+            "Validates storage directory permissions, resolves the official agy\n"
+            "executable (or configured custom resolver), checks agy version\n"
+            "compatibility, and reports system health status."
+        ),
+        epilog=("Examples:\n  magy doctor\n  magy doctor --json"),
+        formatter_class=fmt,
     )
     doctor_parser.add_argument(
         "--json",
@@ -43,6 +84,13 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser(
         "status",
         help="Show profiles and routing status overview.",
+        description=(
+            "Show profiles and routing status overview.\n\n"
+            "Displays round-robin cursor state, profile counts (total, enabled,\n"
+            "healthy, untested, in cooldown), and health summaries."
+        ),
+        epilog=("Examples:\n  magy status\n  magy status --json"),
+        formatter_class=fmt,
     )
     status_parser.add_argument(
         "--json",
@@ -53,27 +101,89 @@ def build_parser() -> argparse.ArgumentParser:
     profile_parser = subparsers.add_parser(
         "profile",
         help="Manage and bootstrap profiles.",
+        description=(
+            "Manage and bootstrap isolated Antigravity profiles.\n\n"
+            "Profiles store separate authentication tokens, configuration, and home\n"
+            "directories under ~/.local/share/magy/profiles/<name>/home.\n"
+            "Magy automatically cycles between enabled, healthy profiles during\n"
+            "round-robin routing."
+        ),
+        epilog=(
+            "Profile Actions:\n"
+            "  add           Register a new profile (managed or external)\n"
+            "  create        Create a profile directory layout (alias for 'add')\n"
+            "  auth          Launch agy interactively to authenticate a profile\n"
+            "  run           Run an agy command directly within a profile environment\n"
+            "  list          List registered profiles and health status\n"
+            "  show          Show details for a specific profile\n"
+            "  enable        Enable a profile for round-robin routing\n"
+            "  disable       Disable a profile from round-robin routing\n"
+            "  reset-health  Reset profile health to healthy and clear cooldown\n"
+            "  remove        Delete a profile and its isolated directory\n"
+            "  help          Show help for an action (e.g. 'magy profile help add')\n\n"
+            "Examples:\n"
+            "  magy profile add work\n"
+            "  magy profile auth work\n"
+            "  magy profile list\n"
+            "  magy profile show work\n"
+            "  magy profile disable work\n"
+            "  magy profile enable work\n"
+            "  magy profile reset-health work\n"
+            "  magy profile remove work --force\n"
+            "  magy profile add --help"
+        ),
+        formatter_class=fmt,
     )
     profile_subparsers = profile_parser.add_subparsers(
         dest="profile_action", help="Profile actions"
     )
 
-    add_p = profile_subparsers.add_parser("add", help="Add a new profile.")
+    add_p = profile_subparsers.add_parser(
+        "add",
+        help="Add a new profile.",
+        description=(
+            "Add a new profile to Magy.\n\n"
+            "Creates an isolated managed profile directory with safe settings\n"
+            "synchronization, or links an existing directory with --current."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  magy profile add work\n"
+            "  magy profile add personal\n"
+            "  magy profile add default --current"
+        ),
+        formatter_class=fmt,
+    )
     add_p.add_argument("name", help="Profile name.")
     add_p.add_argument(
         "--current",
         action="store_true",
-        help="Register current user home directory as an external profile.",
+        help="Register current user home directory (~/.gemini) as an external profile.",
     )
 
     create_p = profile_subparsers.add_parser(
-        "create", help="Create a profile directory layout (alias to add)."
+        "create",
+        help="Create a profile directory layout (alias to add).",
+        description=(
+            "Create a managed profile directory layout "
+            "(alias for 'magy profile add <name>')."
+        ),
+        epilog=("Examples:\n  magy profile create work"),
+        formatter_class=fmt,
     )
     create_p.add_argument("name", help="Profile name.")
 
     auth_p = profile_subparsers.add_parser(
         "auth",
         help="Launch Agy interactively to authenticate a profile.",
+        description=(
+            "Launch Antigravity (agy) interactively to authenticate a profile.\n\n"
+            "Runs an interactive terminal session with HOME redirected to the\n"
+            "profile's isolated directory. Complete the OAuth login flow to store\n"
+            "credentials strictly inside this profile."
+        ),
+        epilog=("Examples:\n  magy profile auth work\n  magy profile auth personal"),
+        formatter_class=fmt,
     )
     auth_p.add_argument("name", help="Profile name.")
     auth_p.add_argument(
@@ -85,6 +195,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_p = profile_subparsers.add_parser(
         "run",
         help="Run an Agy command within a profile environment.",
+        description=(
+            "Run an Antigravity (agy) command within a profile environment.\n\n"
+            "Directly executes agy with HOME redirected to the designated profile,\n"
+            "bypassing automatic round-robin selection. Updates profile health."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  magy profile run work -- models\n"
+            '  magy profile run work -- "Refactor database schema"'
+        ),
+        formatter_class=fmt,
     )
     run_p.add_argument("name", help="Profile name.")
     run_p.add_argument(
@@ -93,7 +214,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arguments forwarded to agy.",
     )
 
-    list_p = profile_subparsers.add_parser("list", help="List registered profiles.")
+    list_p = profile_subparsers.add_parser(
+        "list",
+        help="List registered profiles.",
+        description=(
+            "List all registered profiles.\n\n"
+            "Displays a summary table of profile names, kinds (managed/external),\n"
+            "enabled status, current health classification, and remaining cooldown."
+        ),
+        epilog=("Examples:\n  magy profile list\n  magy profile list --json"),
+        formatter_class=fmt,
+    )
     list_p.add_argument(
         "--json",
         action="store_true",
@@ -101,7 +232,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     show_p = profile_subparsers.add_parser(
-        "show", help="Show details for a specific profile."
+        "show",
+        help="Show details for a specific profile.",
+        description=(
+            "Show detailed information for a specific profile.\n\n"
+            "Displays profile type, home path, enabled status, health status,\n"
+            "active cooldown, and timestamps of selection, success, and failure."
+        ),
+        epilog=("Examples:\n  magy profile show work\n  magy profile show work --json"),
+        formatter_class=fmt,
     )
     show_p.add_argument("name", help="Profile name.")
     show_p.add_argument(
@@ -110,24 +249,114 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output profile in JSON format.",
     )
 
-    enable_p = profile_subparsers.add_parser("enable", help="Enable a profile.")
+    enable_p = profile_subparsers.add_parser(
+        "enable",
+        help="Enable a profile.",
+        description=(
+            "Enable a previously disabled profile.\n\n"
+            "Restores the profile to the round-robin pool with previous health."
+        ),
+        epilog=("Examples:\n  magy profile enable work"),
+        formatter_class=fmt,
+    )
     enable_p.add_argument("name", help="Profile name.")
 
-    disable_p = profile_subparsers.add_parser("disable", help="Disable a profile.")
+    disable_p = profile_subparsers.add_parser(
+        "disable",
+        help="Disable a profile.",
+        description=(
+            "Disable a profile.\n\n"
+            "Excludes the profile from round-robin while preserving configuration,\n"
+            "tokens, and health status for when it is re-enabled."
+        ),
+        epilog=("Examples:\n  magy profile disable work"),
+        formatter_class=fmt,
+    )
     disable_p.add_argument("name", help="Profile name.")
 
     reset_p = profile_subparsers.add_parser(
-        "reset-health", help="Reset health of a profile to healthy."
+        "reset-health",
+        help="Reset health of a profile to healthy.",
+        description=(
+            "Reset profile health to healthy.\n\n"
+            "Clears active cooldown timer, failure reason, and error classification,\n"
+            "immediately making the profile eligible for round-robin selection."
+        ),
+        epilog=("Examples:\n  magy profile reset-health work"),
+        formatter_class=fmt,
     )
     reset_p.add_argument("name", help="Profile name.")
 
-    remove_p = profile_subparsers.add_parser("remove", help="Remove a profile.")
+    remove_p = profile_subparsers.add_parser(
+        "remove",
+        help="Remove a profile.",
+        description=(
+            "Remove a profile from Magy.\n\n"
+            "Deletes the profile record and its isolated home directory and storage.\n"
+            "Active profiles running operations cannot be removed."
+        ),
+        epilog=(
+            "Examples:\n  magy profile remove work\n  magy profile remove work --force"
+        ),
+        formatter_class=fmt,
+    )
     remove_p.add_argument("name", help="Profile name.")
     remove_p.add_argument(
         "--force",
         "-f",
         action="store_true",
         help="Force removal without interactive confirmation.",
+    )
+
+    help_p = profile_subparsers.add_parser(
+        "help",
+        help="Show help for a profile action (e.g., 'magy profile help add').",
+        description=(
+            "Show help for a profile action.\n\n"
+            "Displays detailed usage and options for any profile action."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  magy profile help add\n"
+            "  magy profile help auth\n"
+            "  magy profile help list\n"
+            "  magy profile help show\n"
+            "  magy profile help remove"
+        ),
+        formatter_class=fmt,
+    )
+    help_p.add_argument(
+        "action",
+        nargs="?",
+        help="Profile action to display help for (e.g. 'add', 'auth', 'list', 'show').",
+    )
+
+    help_parser = subparsers.add_parser(
+        "help",
+        help="Show help for magy or a specific subcommand.",
+        description=(
+            "Show help for magy or a specific subcommand.\n\n"
+            "Displays top-level help or detailed help for any subcommand\n"
+            "(e.g., 'doctor', 'status', 'profile', or 'profile <action>')."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  magy help\n"
+            "  magy help doctor\n"
+            "  magy help status\n"
+            "  magy help profile\n"
+            "  magy help profile add\n"
+            "  magy help profile auth\n"
+            "  magy help profile list\n"
+            "  magy help profile show\n"
+            "  magy help profile remove"
+        ),
+        formatter_class=fmt,
+    )
+    help_parser.add_argument(
+        "topic",
+        nargs="*",
+        help="Topic to display help for (e.g. 'profile', 'doctor', 'status').",
     )
 
     worker_p = subparsers.add_parser("worker", help=argparse.SUPPRESS)
@@ -245,6 +474,38 @@ def handle_profile_command(
     )
 
     action = args.profile_action
+    if action and any(h in remaining for h in ("help", "-h", "--help")):
+        try:
+            parser.parse_args(["profile", action, "--help"])
+        except SystemExit as exc:
+            if exc.code == 0:
+                return 0
+            raise
+        return 0
+
+    if (
+        action
+        in (
+            "add",
+            "create",
+            "auth",
+            "run",
+            "show",
+            "enable",
+            "disable",
+            "reset-health",
+            "remove",
+        )
+        and getattr(args, "name", None) == "help"
+    ):
+        try:
+            parser.parse_args(["profile", action, "--help"])
+        except SystemExit as exc:
+            if exc.code == 0:
+                return 0
+            raise
+        return 0
+
     if action in ("add", "create"):
         if remaining:
             parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
@@ -407,9 +668,70 @@ def handle_profile_command(
             print(f"magy: error: {e}", file=sys.stderr)
             return 1
 
-    else:
-        parser.parse_args(["profile", "--help"])
+    elif action == "help":
+        target = getattr(args, "action", None)
+        try:
+            if target:
+                parser.parse_args(["profile", target, "--help"])
+            else:
+                parser.parse_args(["profile", "--help"])
+        except SystemExit as exc:
+            if exc.code == 0:
+                return 0
+            raise
         return 0
+
+    else:
+        try:
+            parser.parse_args(["profile", "--help"])
+        except SystemExit as exc:
+            if exc.code == 0:
+                return 0
+            raise
+        return 0
+
+
+def handle_help_command(topics: list[str], parser: argparse.ArgumentParser) -> int:
+    clean_topics = [t for t in topics if t != "help"]
+    if not clean_topics or clean_topics[0] in ("-h", "--help", "-p", "--profile"):
+        parser.print_help()
+        return 0
+
+    cmd = clean_topics[0]
+    sub_topics = clean_topics[1:]
+
+    if cmd == "profile":
+        if not sub_topics:
+            try:
+                parser.parse_args(["profile", "--help"])
+            except SystemExit as exc:
+                if exc.code == 0:
+                    return 0
+                raise
+            return 0
+        action = sub_topics[0]
+        try:
+            parser.parse_args(["profile", action, "--help"])
+        except SystemExit as exc:
+            if exc.code == 0:
+                return 0
+            raise
+        return 0
+    elif cmd in ("doctor", "status", "worker"):
+        try:
+            parser.parse_args([cmd, "--help"])
+        except SystemExit as exc:
+            if exc.code == 0:
+                return 0
+            raise
+        return 0
+    else:
+        print(
+            f"magy: error: unknown help topic '{' '.join(clean_topics)}'. "
+            f"Run 'magy help' or 'magy --help' for available commands.",
+            file=sys.stderr,
+        )
+        return 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -437,23 +759,42 @@ def main(argv: list[str] | None = None) -> int:
         pre_args = list(argv)
         post_args = None
 
-    if "-h" in pre_args or "--help" in pre_args:
-        parser.print_help()
-        return 0
-
-    if "-V" in pre_args or "--version" in pre_args:
-        print(f"magy {v_str}")
-        return 0
+    # Handle explicit top-level help command
+    if pre_args and pre_args[0] == "help":
+        return handle_help_command(pre_args[1:], parser)
 
     # Subcommands
     if argv[0] in ("doctor", "status", "profile", "worker"):
-        args, remaining = parser.parse_known_args(argv)
+        if len(argv) > 1 and argv[1] == "help":
+            return handle_help_command(argv, parser)
+        try:
+            args, remaining = parser.parse_known_args(argv)
+        except SystemExit as exc:
+            if exc.code == 0:
+                return 0
+            raise
         if args.subcommand == "doctor":
             if remaining:
+                if any(h in remaining for h in ("help", "-h", "--help")):
+                    try:
+                        parser.parse_args(["doctor", "--help"])
+                    except SystemExit as exc:
+                        if exc.code == 0:
+                            return 0
+                        raise
+                    return 0
                 parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
             return run_doctor(args)
         elif args.subcommand == "status":
             if remaining:
+                if any(h in remaining for h in ("help", "-h", "--help")):
+                    try:
+                        parser.parse_args(["status", "--help"])
+                    except SystemExit as exc:
+                        if exc.code == 0:
+                            return 0
+                        raise
+                    return 0
                 parser.error(f"Unrecognized arguments: {' '.join(remaining)}")
             return run_status(args)
         elif args.subcommand == "profile":
@@ -465,9 +806,17 @@ def main(argv: list[str] | None = None) -> int:
 
             return run_worker(args.run_id)
 
+    if "-h" in pre_args or "--help" in pre_args:
+        parser.print_help()
+        return 0
+
+    if "-V" in pre_args or "--version" in pre_args:
+        print(f"magy {v_str}")
+        return 0
+
     # Check for misplaced subcommands when no '--' was given
     if post_args is None:
-        for sub in ("doctor", "status", "profile"):
+        for sub in ("doctor", "status", "profile", "help"):
             if sub in argv:
                 parser.error(
                     f"misplaced subcommand '{sub}': subcommands must precede "
