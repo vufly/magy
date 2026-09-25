@@ -8,7 +8,7 @@ if unsatisfied, and continue with a follow-up prompt that preserves conversation
 context. The workflow returns a durable Git diff after each run. The harness
 agent drives the loop; no interactive shell fallback is needed.
 
-**Status: Implemented.** Delivered in Milestone 4 and integrated into `src/magy/reviews.py`, `src/magy/review_runner.py`, and `src/magy/mcp_server.py`. Documented in [`docs/guides/mcp-configuration.md`](../../guides/mcp-configuration.md) and [`docs/architecture/overview.md`](../../architecture/overview.md).
+**Status: Implemented.** Delivered in Milestone 4 and integrated into `src/magy/reviews.py`, `src/magy/review_runner.py`, and `src/magy/mcp_server.py`. Subsequent refinement switched execution to `--output-format stream-json`, rendering live human-readable progress in the floating pane while logging clean NDJSON to `pty.log`. `auto_approval=True` is required so Agy uses `--dangerously-skip-permissions`. The reviewed runner closes its execution pane upon completion; an orchestrating client can open a separate pane for review. Documented in [`docs/guides/mcp-configuration.md`](../../guides/mcp-configuration.md) and [`docs/architecture/overview.md`](../../architecture/overview.md).
 
 ## Execution model (revised)
 
@@ -72,8 +72,9 @@ client timeouts.
    (`magy.cli --profile <selected> -- --print <prompt> [--continue] ...`) so
    profile credential isolation, settings synchronisation, and health handling
    remain consistent. Preserve supported Agy options (`--model`, `--agent`,
-   `--effort`, `--mode`, `--sandbox`, `--add-dir`). Default reviewed runs to
-   `auto_approval=False` so Agy tool-approval prompts remain visible.
+   `--effort`, `--mode`, `--sandbox`, `--add-dir`). Note that in non-interactive
+   `stream-json` execution, `auto_approval=True` is required so Agy uses
+   `--dangerously-skip-permissions` to execute tool actions without denial.
 
 4. Generate an owner-only Bash script that runs Agy, captures its exit code, and
    writes the `.exit` signal on completion. Launch it through an argument-vector
@@ -87,10 +88,11 @@ client timeouts.
    user-controlled text into shell source. Capture the Zellij pane ID from its
    output.
 
-5. Record Agy's PTY output in a per-run terminal log using a PTY transcript
-   (not by redirecting output away from the TTY). Preserve Agy's exit status.
-   The pane exits automatically when Agy finishes. Treat launch errors and a
-   pane closed before signal publication as failed/interrupted runs.
+5. Record Agy's output stream in a per-run log (`pty.log` receiving raw NDJSON)
+   while parsing and rendering human-readable event lines directly to the Zellij
+   pane in real-time. Preserve Agy's exit status. The execution pane exits and
+   closes automatically upon completion. Treat launch errors and a pane closed
+   before signal publication as failed/interrupted runs.
 
 6. Atomically publish a run-specific `.exit` signal containing Agy's exit code
    when the script completes. No fallback shell is started.

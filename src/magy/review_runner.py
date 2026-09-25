@@ -80,15 +80,17 @@ def _render_event(event: dict) -> str | None:
 def _process_stream(
     proc: subprocess.Popen,
     log_path: Path,
+    review_dir: Path | None = None,
+    review_id: str | None = None,
 ) -> int:
-    """
-    Read stream-json lines from stdout, render to terminal, write raw to log.
+    """Read stream-json lines from stdout, render to terminal, write raw to log.
 
     stderr is inherited (goes directly to Zellij pane for real-time display).
     stdout carries NDJSON events — rendered as human-readable for the pane,
     and logged raw for machine consumption.
     """
     final_status = None
+    recorded_conv_id = False
 
     assert proc.stdout is not None
     with open(log_path, "a", encoding="utf-8") as log_f:
@@ -108,6 +110,24 @@ def _process_stream(
                 # Non-JSON prefix (e.g. magy routing header) — pass through as-is
                 print(raw_line, flush=True)
                 continue
+
+            conv_id = (
+                event.get("conversation_id")
+                or event.get("init", {}).get("conversation_id")
+                or event.get("result", {}).get("conversation_id")
+            )
+            if conv_id and not recorded_conv_id and review_dir and review_id:
+                recorded_conv_id = True
+                try:
+                    lock = get_review_lock(review_id)
+                    with lock:
+                        state_file = review_dir / "state.json"
+                        state_data = read_json(state_file)
+                        if state_data:
+                            state_data["conversation_id"] = conv_id
+                            atomic_write_json(state_file, state_data)
+                except Exception:
+                    pass
 
             rendered = _render_event(event)
             if rendered is not None:
@@ -166,7 +186,10 @@ def run_review_runner(review_dir_path: str) -> int:
         "--output-format",
         "stream-json",
     ]
-    if req.get("continue_review_id"):
+    # Target specific conversation ID to eliminate race conditions
+    if req.get("conversation_id"):
+        cmd.extend(["--conversation", req["conversation_id"]])
+    elif req.get("continue_review_id"):
         cmd.append("--continue")
     if req.get("auto_approval"):
         cmd.append("--dangerously-skip-permissions")
@@ -206,7 +229,12 @@ def run_review_runner(review_dir_path: str) -> int:
         bufsize=1,  # line-buffered for real-time delivery
     )
 
-    return _process_stream(proc, log_path)
+    return _process_stream(
+        proc,
+        log_path,
+        review_dir=review_dir,
+        review_id=req["review_id"],
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -70,6 +70,6 @@ Magy is a local process supervisor and MCP server that manages isolated Antigrav
 
 > [!CAUTION]
 > **MCP Auto-Approval Security Notice**
-> By default, Magy executes Antigravity CLI runs requiring interactive confirmation for potentially destructive tool actions (such as filesystem modifications or terminal commands).
-> While the MCP server schema supports an optional `auto_approve` flag for fully autonomous pipelines, **enabling auto-approval allows the model to execute commands and write files without human-in-the-loop review**.
-> Use `auto_approve` only within sandboxed environments or when operating on throwaway branches.
+> Headless MCP runs (`magy_run_start`) and interactive Zellij sessions (`magy_run_headful`) default to `auto_approval=True` (`--dangerously-skip-permissions`) to prevent unattended workflows from stalling on permission prompts. For reviewed runs (`magy_run_review_start`), `auto_approval=True` is required so Agy can execute tool actions under `stream-json`.
+> **Enabling auto-approval allows the model to execute commands and write files without human-in-the-loop confirmation**.
+> Set `auto_approval=False` when human authorization is required, and use `auto_approval=True` only within sandboxed environments or on throwaway branches.

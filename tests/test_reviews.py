@@ -583,9 +583,21 @@ def test_runner_sets_env_vars_and_parses_stream_json(
         def wait(self):
             return 0
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    captured_cmds = []
+    real_popen = subprocess.Popen
+
     def fake_popen(cmd, **kwargs):
-        captured_env.update(os.environ.copy())
-        return FakeProc()
+        if any("magy.cli" in str(arg) for arg in cmd):
+            captured_cmds.append(list(cmd))
+            captured_env.update(os.environ.copy())
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
 
     monkeypatch.setattr("magy.review_runner.subprocess.Popen", fake_popen)
 
@@ -597,6 +609,28 @@ def test_runner_sets_env_vars_and_parses_stream_json(
     # Env vars correctly set for _terminate_pid_tree verification
     assert captured_env.get("MAGY_REVIEW_ID") == start_res.review_id
     assert captured_env.get("MAGY_RUN_ID") == start_res.review_id
+
+    # conversation_id correctly captured into state.json
+    st = reviews.get_review_state(start_res.review_id)
+    assert st.conversation_id == "abc123"
+
+    # Continuation uses --conversation <id> instead of race-prone --continue
+    finalize_review(start_res.review_id, exit_code=0)
+    cont_res = start_review_run(
+        "Followup step",
+        workspace=str(git_repo),
+        continue_review_id=start_res.review_id,
+    )
+    cont_dir = get_review_dir(cont_res.review_id)
+    cont_req = reviews.get_review_request(cont_res.review_id)
+    assert cont_req.conversation_id == "abc123"
+
+    run_review_runner(str(cont_dir))
+    last_cmd = captured_cmds[-1]
+    assert "--conversation" in last_cmd
+    conv_idx = last_cmd.index("--conversation")
+    assert last_cmd[conv_idx + 1] == "abc123"
+    assert "--continue" not in last_cmd
 
     # pty.log written with raw NDJSON (machine-readable)
     log_content = (review_dir / "pty.log").read_text(encoding="utf-8")

@@ -70,7 +70,7 @@ the other's effective identity.
 
 ### M1-S6: Record compatibility result
 
-Write a short report under `docs/verification/` containing:
+Write a short report under `docs/plans/v1/verification/` containing:
 
 - Agy version and OS.
 - Commands executed with secrets removed.

@@ -91,10 +91,10 @@ Once configured, the following tools are available through MCP:
 | `magy_run_result` | Retrieve bounded output chunks with stable offsets | `run_id`, `offset` (default 0), `limit` (default 64 KiB) |
 | `magy_run_cancel` | Terminate a running or queued process tree | `run_id` |
 | `magy_profiles` | Query registered profiles, availability, and routing | None |
-| `magy_run_review_start` | Start a reviewed non-interactive Agy run in a floating Zellij pane with Git snapshots | `prompt` (required), `workspace`, `profile`, `model`, `agent`, `effort`, `mode`, `sandbox`, `additional_dirs`, `auto_approval` (default False), `continue_review_id` |
+| `magy_run_review_start` | Start a reviewed non-interactive Agy run in a floating Zellij pane with Git snapshots | `prompt` (required), `workspace`, `profile`, `model`, `agent`, `effort`, `mode`, `sandbox`, `additional_dirs`, `auto_approval` (default False; True required for automated tool actions), `continue_review_id` |
 | `magy_run_review_status` | Query review run status (`running`, `completed`, `failed`, `cancelled`) | `review_id` (required) |
 | `magy_run_review_wait` | Short-poll until a review run completes, fails, or is cancelled | `review_id` (required), `timeout` (default 20s, max 60s) |
-| `magy_run_review_log` | Retrieve bounded PTY terminal log chunks for mid-run monitoring | `review_id` (required), `offset` (default 0), `limit` (default 64 KiB) |
+| `magy_run_review_log` | Retrieve bounded execution log chunks (NDJSON events) for mid-run monitoring | `review_id` (required), `offset` (default 0), `limit` (default 64 KiB) |
 | `magy_run_review_cancel` | Cancel a review run, terminate processes, close pane, and release repo lease | `review_id` (required) |
 | `magy_run_review_result` | Retrieve bounded chunks of the net Git diff produced by the run | `review_id` (required), `offset` (default 0), `limit` (default 64 KiB) |
 
@@ -115,7 +115,7 @@ execution.
 
 ## 4. Human-in-the-Loop Review Workflow (Terminal UI & Git Snapshots)
 
-The review workflow (`magy_run_review_*`) allows an orchestrating agent to delegate tasks to Agy in a visible floating Zellij pane, stream PTY output for real-time monitoring, preserve conversation context across follow-up iterations, and capture a clean Git patch diff excluding pre-existing repository dirt.
+The review workflow (`magy_run_review_*`) allows an orchestrating agent to delegate tasks to Agy in a visible floating Zellij pane, stream NDJSON output for real-time monitoring, preserve conversation context across follow-up iterations, and capture a clean Git patch diff excluding pre-existing repository dirt.
 
 ### Prerequisites
 
@@ -125,15 +125,15 @@ The review workflow (`magy_run_review_*`) allows an orchestrating agent to deleg
 
 ### Execution Model
 
-1. **Non-Interactive Floating Pane**: Unlike `magy_run_headful` (which opens an interactive REPL in a split pane), reviewed runs launch `agy --print <prompt>` in a floating Zellij pane. The user observes thinking and execution in real time. The process exits automatically upon completion, leaving process control to the orchestrating agent.
-2. **Interactive Tool Approvals**: `magy_run_review_start` defaults to `auto_approval=False` so that Agy tool-approval prompts remain visible for user confirmation in the pane. Setting `auto_approval=True` passes `--dangerously-skip-permissions` if non-interactive tool execution is desired.
-3. **Mid-Run Monitoring**: Terminal output is captured via a PTY transcript in `reviews/<review-id>/pty.log`. The harness agent can read chunked logs mid-run with `magy_run_review_log` to observe progress without blocking.
+1. **Non-Interactive Floating Pane**: Unlike `magy_run_headful` (which opens an interactive REPL in a split pane), reviewed runs launch `agy --print <prompt> --output-format stream-json` in a floating Zellij pane. The user observes thinking and execution in real time as human-readable events rendered in the pane, while stderr is inherited live. The process exits automatically upon completion, leaving process control to the orchestrating agent.
+2. **Tool Permissions and Auto-Approval**: In `stream-json` mode, Agy operates non-interactively and does not accept interactive approval prompts in the terminal pane. While `magy_run_review_start` defaults to `auto_approval=False`, setting `auto_approval=True` is required so that Agy passes `--dangerously-skip-permissions`; without it, tool actions requiring permissions are denied.
+3. **Mid-Run Monitoring**: Terminal events are recorded as raw NDJSON in `reviews/<review-id>/pty.log` while rendered in human-readable form in the Zellij pane. The harness agent can read chunked logs mid-run with `magy_run_review_log` to observe progress without blocking.
 4. **Git Baseline Snapshots & Dirt Exclusion**: Prior to launching Zellij, Magy creates a temporary Git index tree snapshot of tracked, staged, unstaged, and non-ignored untracked files without altering the user's working tree or index. When execution finishes, a final snapshot is taken and net diff computed:
    ```bash
    git diff --no-ext-diff --no-textconv --binary <baseline-tree> <final-tree>
    ```
    All pre-existing untracked files, staged changes, and unstaged modifications are excluded from the returned patch.
 5. **Repository Concurrency Lease**: To prevent interleaving changes from concurrent review runs in the same workspace, Magy acquires an exclusive lease per repository root. A second active reviewed run in the same repository is rejected until the active run completes, fails, or is cancelled.
-6. **Continuation and Profile Pinning**: Supplying `continue_review_id` to `magy_run_review_start` resumes a prior conversation. Magy pins the profile to the one used in the referenced review run (bypassing round-robin) and appends `--continue` to Agy's arguments. This ensures Agy accesses the prior run's conversation SQLite store inside the profile's synthetic home.
-7. **Signal Publication & Pane Cleanup**: On process completion, an `.exit` signal file is atomically written. A detached monitor detects the signal, computes the final Git diff, records completion state, releases the repository lease, and closes the floating pane via `zellij action close-pane`.
-8. **Cancellation**: Calling `magy_run_review_cancel` terminates the running process tree, closes the Zellij pane, releases the repository lease, preserves partial PTY logs, and marks the status as `cancelled`.
+6. **Continuation and Profile Pinning**: Supplying `continue_review_id` to `magy_run_review_start` resumes a prior conversation. Magy pins the profile to the one used in the referenced review run (bypassing round-robin) and passes `--conversation <conversation_id>` (captured from the initial run's `init` event, with `--continue` fallback). This guarantees deterministic conversation targeting and eliminates race conditions if other interactions occurred on that profile.
+7. **Signal Publication & Pane Cleanup**: On process completion, an `.exit` signal file is atomically written. A detached monitor detects the signal, computes the final Git diff, records completion state, releases the repository lease, and closes the reviewed runner's floating execution pane via `zellij action close-pane`. An orchestrating client can open a separate pane to inspect diffs and test results.
+8. **Cancellation**: Calling `magy_run_review_cancel` terminates the running process tree, closes the Zellij pane, releases the repository lease, preserves partial execution logs, and marks the status as `cancelled`.

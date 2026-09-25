@@ -160,7 +160,7 @@ sequenceDiagram
     
     loop Stream Monitoring
         Agent->>Magy: magy_run_review_log(review_id, offset)
-        Magy-->>Agent: Bounded PTY output chunks
+        Magy-->>Agent: Bounded stream log chunks (NDJSON)
     end
     
     Zellij->>Zellij: Execution finishes, writes .exit signal
@@ -174,13 +174,13 @@ sequenceDiagram
 ```
 
 ### Key Design Pillars:
-1. **Non-Interactive Floating Pane**: Runs `agy --print <prompt>` in a floating Zellij pane. The user observes thinking and tool execution in real-time, but the process terminates cleanly on completion.
+1. **Non-Interactive Floating Pane**: Runs `agy --print <prompt> --output-format stream-json` in a floating Zellij pane. Real-time events are parsed and rendered as human-readable progress in the pane while raw events are logged to `pty.log`. Upon completion, the runner automatically closes its execution pane; a client can open a separate pane to inspect results.
 2. **Git Baseline Dirt Exclusion**: Creates a temporary Git tree index of tracked, staged, and untracked files before launch. The final diff computed on completion excludes all pre-existing modifications:
    ```bash
    git diff --no-ext-diff --no-textconv --binary <baseline-tree> <final-tree>
    ```
 3. **Repository Concurrency Lease**: Exclusive lease per repository root prevents interleaved modifications from concurrent review runs.
-4. **Conversation Continuation & Profile Pinning**: Supplying `continue_review_id` pins the execution to the exact profile used previously and passes `--continue`, seamlessly preserving conversation SQLite context.
+4. **Conversation Continuation & Profile Pinning**: Supplying `continue_review_id` pins the execution to the exact profile used previously and passes `--conversation <conversation_id>` (with `--continue` fallback), seamlessly preserving conversation context without race conditions.
 
 ---
 
@@ -191,3 +191,4 @@ sequenceDiagram
 - [MCP Server Setup & Tools](../guides/mcp-configuration.md)
 - [Windows Verification & Testing](../guides/windows-testing.md)
 - [v1 Milestone Roadmap](../plans/v1/README.md)
+- [Human-in-the-Loop Review Plan](../plans/v1/mcp-human-in-loop-terminal-ui.md)

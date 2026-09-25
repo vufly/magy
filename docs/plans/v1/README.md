@@ -95,6 +95,10 @@ clear ownership or test seam.
 - Interactive MCP terminal attachment, guarded input, or goal orchestration.
 - Parsing private model reasoning from Agy trajectories.
 
+## Extensions & Feature Plans
+
+- [Human-in-the-Loop MCP Review Workflow](mcp-human-in-loop-terminal-ui.md): Specification for Zellij-backed reviewed runs, stream monitoring, and Git snapshot diff capture (delivered in M4).
+
 ---
 
 ## Verification & Architecture

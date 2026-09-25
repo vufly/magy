@@ -48,6 +48,7 @@ class ReviewRunRequest:
     additional_dirs: list[str] | None = None
     auto_approval: bool = False
     continue_review_id: str | None = None
+    conversation_id: str | None = None
     baseline_tree: str = ""
     baseline_commit: str = ""
     created_at: float = field(default_factory=time.time)
@@ -82,6 +83,7 @@ class ReviewRunState:
     pty_log_path: str = ""
     diff_path: str = ""
     exit_signal_path: str = ""
+    conversation_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -108,6 +110,7 @@ class ReviewRunStatus:
     status: str
     profile: str | None = None
     workspace: str | None = None
+    conversation_id: str | None = None
     exit_code: int | None = None
     error: str | None = None
     created_at: float = 0.0
@@ -632,6 +635,7 @@ def start_review_run(
 
     # Profile pinning and continuation
     selected_profile_name = profile
+    conversation_id_to_continue = None
     if continue_review_id:
         prior_dir = get_review_dir(continue_review_id)
         if not (prior_dir / "state.json").exists():
@@ -643,6 +647,22 @@ def start_review_run(
                 f"with profile '{prior_state.profile}'"
             )
         selected_profile_name = prior_state.profile
+        conversation_id_to_continue = prior_state.conversation_id
+        if not conversation_id_to_continue and (prior_dir / "pty.log").exists():
+            try:
+                with open(prior_dir / "pty.log", "r", encoding="utf-8") as f:
+                    for _line in f:
+                        _line = _line.strip()
+                        if _line.startswith("{"):
+                            _d = json.loads(_line)
+                            _c = _d.get("conversation_id") or _d.get("init", {}).get(
+                                "conversation_id"
+                            )
+                            if _c:
+                                conversation_id_to_continue = _c
+                                break
+            except Exception:
+                pass
 
     selected = select_profile(explicit_name=selected_profile_name)
     profile_name = selected.name
@@ -696,6 +716,7 @@ def start_review_run(
         "pty_log_path": None,
         "diff_path": None,
         "exit_signal_path": None,
+        "conversation_id": conversation_id_to_continue,
     }
     atomic_write_json(review_dir / "state.json", _stub_state)
 
@@ -730,6 +751,7 @@ def start_review_run(
             additional_dirs=additional_dirs,
             auto_approval=auto_approval,
             continue_review_id=continue_review_id,
+            conversation_id=conversation_id_to_continue,
             baseline_tree=baseline_tree,
             baseline_commit=head_commit,
         )
@@ -747,6 +769,7 @@ def start_review_run(
             pty_log_path=str(pty_log),
             diff_path=str(diff_file),
             exit_signal_path=str(exit_file),
+            conversation_id=conversation_id_to_continue,
         )
 
         atomic_write_json(review_dir / "request.json", req.to_dict())
@@ -865,6 +888,7 @@ def get_review_status(review_id: str) -> ReviewRunStatus:
         status=state.status,
         profile=state.profile,
         workspace=state.workspace,
+        conversation_id=state.conversation_id,
         exit_code=state.exit_code,
         error=state.error,
         created_at=state.created_at,
