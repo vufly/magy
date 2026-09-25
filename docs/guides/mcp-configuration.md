@@ -101,7 +101,7 @@ Once configured, the following tools are available through MCP:
 > [!NOTE]
 > `magy_run_start` defaults to `auto_approval=True` (`--dangerously-skip-permissions`)
 > to enable unattended headless delegation. Set `auto_approval=False` if tool
-> actions require interactive approval.
+> actions require interactive approval. See [`docs/architecture/security.md`](../architecture/security.md) for details on trust boundaries.
 
 `magy_run_headful` requires OpenCode and its Magy MCP server to run inside an
 active Zellij session. It opens Agy in a right split and returns the pane ID;

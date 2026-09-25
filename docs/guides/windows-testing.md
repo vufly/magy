@@ -48,7 +48,7 @@ uv run pytest
 ```
 
 > [!NOTE]
-> Some tests checking string path representations with backslashes on Windows may fail due to deferred backlog item ("Cross-platform CI verification"). Focus on core CLI, profile management, and live process isolation.
+> Some tests checking string path representations with backslashes on Windows may fail due to deferred backlog item ("Cross-platform CI verification" in [`docs/plans/backlog.md`](../plans/backlog.md)). Focus on core CLI, profile management, and live process isolation.
 
 Run focused CLI and profile tests:
 
@@ -169,7 +169,7 @@ In OpenCode or Codex configuration on Windows (`%APPDATA%\opencode\config.json` 
 }
 ```
 
-Verify that tools (`magy_profiles`, `magy_run`, `magy_wait`, `magy_cancel`) appear in the client.
+Verify that tools (`magy_profiles`, `magy_run_start`, `magy_run_wait`, `magy_run_status`, `magy_run_result`, `magy_run_cancel`) appear in the client.
 
 ---
 

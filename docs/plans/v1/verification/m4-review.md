@@ -26,7 +26,7 @@ magy profile current
 Neither `set-current` nor `current` existed as profile subcommands. Actual subcommands are:
 `add`, `create`, `auth`, `run`, `list`, `show`, `enable`, `disable`, `reset-health`, `remove`.
 
-**Remediation:** Replaced the "Default / Current Profile" subsection with "Inspecting Profiles" using the valid `magy profile show <name>` command. Updated `docs/verification/m4-implementation.md` command listing accordingly.
+**Remediation:** Replaced the "Default / Current Profile" subsection with "Inspecting Profiles" using the valid `magy profile show <name>` command. Updated [`m4-implementation.md`](m4-implementation.md) command listing accordingly.
 
 ---
 
@@ -44,7 +44,7 @@ Neither `set-current` nor `current` existed as profile subcommands. Actual subco
 - `magy -p vu2371992 -- --version` executed in isolated synthetic home.
 
 ### M4-S3: Security Review
-- All seven plan items addressed in `docs/security-review.md`:
+- All seven plan items addressed in [`docs/architecture/security.md`](../../../architecture/security.md):
   - Zero credential introspection.
   - Path traversal via `validate_identifier()`.
   - Symlink traversal prevention (allowlist, TOCTOU inode verification).
@@ -61,7 +61,7 @@ Neither `set-current` nor `current` existed as profile subcommands. Actual subco
 ### M4-S5: Compatibility Report & Doctor
 - `evaluate_agy_compatibility()` correctly prefix-matches on `"1.2."`, `"1.1."`, `"1.0."` — avoids false positives like `1.20.0` (correctly unverified) and handles `v`-prefixed versions.
 - `compatibility_note` only populated when executable is found; `None` propagated to JSON when Agy absent — correct behavior, tested.
-- `docs/compatibility.md` documents OS matrix, Python version matrix, tested Agy versions, storage assumptions, and prominent undocumented-change warning.
+- [`docs/architecture/compatibility.md`](../../../architecture/compatibility.md) documents OS matrix, Python version matrix, tested Agy versions, storage assumptions, and prominent undocumented-change warning.
 
 ### M4-S6: Release Artifacts
 - `uv build` produces `dist/magy-0.1.0-py3-none-any.whl` and `dist/magy-0.1.0.tar.gz`.
@@ -85,5 +85,5 @@ Neither `set-current` nor `current` existed as profile subcommands. Actual subco
 
 ## Remediation Verification
 
-- **L1 Remediation:** Replaced non-existent commands in `README.md` with `magy profile show <name>`. Updated `docs/verification/m4-implementation.md`.
+- **L1 Remediation:** Replaced non-existent commands in [`README.md`](../../../../README.md) with `magy profile show <name>`. Updated [`m4-implementation.md`](m4-implementation.md).
 - **Status:** All exit criteria satisfied. Ready to commit.

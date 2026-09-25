@@ -99,7 +99,7 @@ intended to ship.
 - Results show effective account separation and no observed shared-keyring
   crosstalk on Agy 1.2.6 under Linux/WSL2. They do not prove internal keyring
   implementation details.
-- Native macOS and Windows execution remains deferred in `docs/backlog.md`.
+- Native macOS and Windows execution remains deferred in [`docs/plans/backlog.md`](../../backlog.md).
 
 ## Commands Run
 

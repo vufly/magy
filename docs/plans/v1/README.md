@@ -94,3 +94,10 @@ clear ownership or test seam.
 - Guaranteeing protection from provider enforcement.
 - Interactive MCP terminal attachment, guarded input, or goal orchestration.
 - Parsing private model reasoning from Agy trajectories.
+
+---
+
+## Verification & Architecture
+
+- **Milestone Verification Reports:** Full audit evidence for each milestone is documented in [`verification/README.md`](verification/README.md).
+- **Architecture Overview:** Implemented system architecture is documented in [`docs/architecture/overview.md`](../../architecture/overview.md).

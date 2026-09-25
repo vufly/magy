@@ -29,14 +29,14 @@ Magy is a local process supervisor and MCP server that manages isolated Antigrav
 ### 2.2 Path Traversal and Profile Identifier Injection
 - **Vulnerability**: Path traversal attacks (e.g., `../../etc/shadow` or directory separators in profile or run names) leading to arbitrary file read/write.
 - **Hardening**:
-  - All profile and run identifiers are strictly validated via `validate_identifier()` in [`magy.storage`](file:///home/vudinhn/repos/magy/src/magy/storage.py).
+  - All profile and run identifiers are strictly validated via `validate_identifier()` in [`magy.storage`](../../src/magy/storage.py).
   - Validation requires `^[a-zA-Z0-9_-]+$`, maximum length 64, non-empty, and explicitly rejects `.`, `..`, path separators (`/`, `\`), control characters, and Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`).
   - Storage paths are constructed using safe path joining and validated to ensure the resulting target is strictly nested under the intended root.
 
 ### 2.3 Settings Synchronization and Symlink Attacks
 - **Vulnerability**: Symlinks in source `~/.gemini/` or destination profiles pointing to sensitive host directories, leading to file overwrite or arbitrary disclosure.
 - **Hardening**:
-  - Implemented in [`magy.settings_sync`](file:///home/vudinhn/repos/magy/src/magy/settings_sync.py).
+  - Implemented in [`magy.profiles`](../../src/magy/profiles.py).
   - Strict allowlist of top-level items: `GEMINI.md`, `antigravity.json`, `tools.json`, `mcp_config.json`, `extensions.json`, `keybindings.json`, `settings.json`, and directories `rules`, `skills`, `extensions`, `workflows`.
   - All source symlinks are resolved against the canonical source directory; symlinks pointing outside are skipped.
   - Destination paths are checked before writing: any symlink component encountered in the destination causes the operation to abort immediately.
@@ -53,7 +53,7 @@ Magy is a local process supervisor and MCP server that manages isolated Antigrav
 ### 2.5 Process Cleanup and PID Reuse
 - **Vulnerability**: Process termination signals (`SIGTERM`/`SIGKILL`) targeting a PID that exited and whose ID was recycled by the operating system, killing an innocent process.
 - **Hardening**:
-  - Implemented in [`magy.worker`](file:///home/vudinhn/repos/magy/src/magy/worker.py) and [`magy.runs`](file:///home/vudinhn/repos/magy/src/magy/runs.py).
+  - Implemented in [`magy.worker`](../../src/magy/worker.py) and [`magy.runs`](../../src/magy/runs.py).
   - Each worker process writes an ephemeral UUID marker file to `/tmp/magy-worker-<pid>.marker` upon starting.
   - Before sending any signal to a process, Magy verifies that the marker file exists, is owned by the current user, and contains the expected run UUID.
   - Descendant processes are tracked through process group hierarchy and `/proc` process trees, ensuring orphaned child processes are cleanly reaped upon run cancellation or timeout.

@@ -8,7 +8,7 @@ across all environment variables, storage roots, and executable paths. Private
 POSIX permissions fail closed if `chmod` fails or if permissive bits remain,
 and atomic writes clean up temporary files on permission failure.
 89 tests pass on Linux across Python 3.11 and Python 3.14. Native macOS and
-Windows execution remains deferred to `docs/backlog.md`. Milestone 0 is approved.
+Windows execution remains deferred to [`docs/plans/backlog.md`](../../backlog.md). Milestone 0 is approved.
 
 ## Re-review Status
 
@@ -19,7 +19,7 @@ Windows execution remains deferred to `docs/backlog.md`. Milestone 0 is approved
 | F3: invalid configuration diagnostics | RESOLVED | Content/schema/lock/OS errors work; path expansion bounded. |
 | G1: process concurrency | RESOLVED | Spawned-process update test passes on Linux. |
 | G2: child-process test scope | RESOLVED | Test and documentation now describe PID tracking only. |
-| G3: native CI evidence | DEFERRED | Tracked in `docs/backlog.md`; required before v1 release. |
+| G3: native CI evidence | DEFERRED | Tracked in [`docs/plans/backlog.md`](../../backlog.md); required before v1 release. |
 | R1: storage-root error boundary | RESOLVED | Unknown-user expansion converted to bounded errors without traceback. |
 | R2: private permissions | RESOLVED | POSIX mode enforcement fails closed; permissive paths rejected. |
 
@@ -156,7 +156,7 @@ Implementation harness should complete these steps before requesting re-review:
 6. Run Ruff and pytest on Python 3.11 and the default local Python.
 7. Obtain Ubuntu, macOS, and Windows CI results after the implementation is
    committed or pushed.
-8. Update `docs/verification/m0-implementation.md` with fixes and evidence.
+8. Update [`m0-implementation.md`](m0-implementation.md) with fixes and evidence.
 
 Re-review should focus on the changed storage/config paths and confirm no M1
 profile behavior was introduced early.
@@ -242,7 +242,7 @@ uv build
 
 Then:
 
-1. Update `docs/verification/m0-implementation.md` with R1/R2 fixes, test counts,
+1. Update [`m0-implementation.md`](m0-implementation.md) with R1/R2 fixes, test counts,
    and build evidence.
 2. Request final M0 re-review.
 3. Approve M0 only when R1 and R2 reproductions return bounded failures and all
@@ -250,4 +250,4 @@ Then:
 4. Commit the approved M0 implementation before starting M1.
 
 Native macOS and Windows CI verification is tracked separately in
-`docs/backlog.md` and no longer blocks M0.
+[`docs/plans/backlog.md`](../../backlog.md) and no longer blocks M0.

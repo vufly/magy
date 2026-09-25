@@ -85,7 +85,7 @@ and six core MCP tools.
 - Does not automatically retry or replay started tasks (leaving replay decisions to callers to avoid unexpected side effects).
 
 ### M3-S6: Harness Examples
-- Documented stdio configuration for Codex and OpenCode in `docs/mcp-configuration.md`.
+- Documented stdio configuration for Codex and OpenCode in [`docs/guides/mcp-configuration.md`](../../../guides/mcp-configuration.md).
 - Examples reference installed `magy-mcp` binary without hardcoded tokens or secrets.
 
 ---

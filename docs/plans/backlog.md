@@ -13,7 +13,7 @@ both operating systems. Record and remediate any platform-specific failures.
 
 Linux coverage remains required during current milestone development. Native
 macOS and Windows verification should resume when suitable runners are
-available.
+available. See [`docs/guides/windows-testing.md`](../guides/windows-testing.md) for manual Windows verification steps.
 
 ## M1 follow-up hardening
 

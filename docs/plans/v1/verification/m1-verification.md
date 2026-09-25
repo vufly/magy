@@ -7,7 +7,7 @@
 Two-account identity separation, repeated launch survival, concurrent execution,
 single-profile invalidation isolation, and real-home non-modification have been
 empirically validated using official Agy 1.2.6. Remaining path hardening and
-test precision are tracked in `docs/backlog.md`.
+test precision are tracked in [`docs/plans/backlog.md`](../../backlog.md).
 
 ## 2. Test Environment
 

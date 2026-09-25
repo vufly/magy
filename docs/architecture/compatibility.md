@@ -16,7 +16,7 @@ This document records the compatibility testing, supported platforms, runtime de
   - Path and symlink security protections verified.
 - **Windows (x86_64)**:
   - Reserved filename protections enforced (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`).
-  - Path separators and cross-platform path resolution verified.
+  - Path separators and cross-platform path resolution verified. See [`docs/guides/windows-testing.md`](../guides/windows-testing.md).
 
 ### Python Versions
 Magy is built and tested against:

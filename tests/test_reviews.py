@@ -536,33 +536,155 @@ def test_lease_stub_state_prevents_race(git_repo: Path, tmp_path: Path, monkeypa
     release_repo_lease(git_repo, review_id)
 
 
-def test_cancel_runner_env_allows_pid_tree_verify(
+def test_runner_sets_env_vars_and_parses_stream_json(
     mock_environment, git_repo: Path, monkeypatch
 ):
-    """Issue #2: runner sets MAGY_RUN_ID=review_id so _terminate_pid_tree can verify."""
+    """Issue #2 + stream-json: runner sets MAGY_RUN_ID/REVIEW_ID and parses events."""
+    import io
     import os
+
+    from magy.review_runner import _render_event, run_review_runner
+
+    start_res = start_review_run("Stream-json env test", workspace=str(git_repo))
+    review_dir = get_review_dir(start_res.review_id)
+
+    captured_env = {}
+
+    # Build fake stream-json output mimicking agy's real events
+    _agent_usage = (
+        '"usage":{"input_tokens":100,"output_tokens":5,'
+        '"thinking_tokens":3,"cache_read_tokens":0,"total_tokens":105}'
+    )
+    _agent_step = (
+        '{"event":"step_update","step_update":{"conversation_id":"abc123",'
+        '"step_index":1,"state":"DONE","step_type":"agent_response",'
+        f'"text_delta":"Hello World.\\n","duration_seconds":1.23,{_agent_usage}}}}}'
+    )
+    _result_line = (
+        '{"event":"result","result":{"conversation_id":"abc123",'
+        f'"status":"SUCCESS","response":"Hello World.\\n",'
+        f'"duration_seconds":1.5,"num_turns":1,{_agent_usage}}}}}'
+    )
+    fake_ndjson = "\n".join(
+        [
+            '{"event":"init","conversation_id":"abc123","init":{"permission_mode":"always-proceed"}}',
+            '{"event":"step_update","step_update":{"conversation_id":"abc123","step_index":0,"state":"DONE","step_type":"user_input"}}',
+            _agent_step,
+            _result_line,
+            "",
+        ]
+    )
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = io.StringIO(fake_ndjson)
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured_env.update(os.environ.copy())
+        return FakeProc()
+
+    monkeypatch.setattr("magy.review_runner.subprocess.Popen", fake_popen)
+
+    exit_code = run_review_runner(str(review_dir))
+
+    # Exit code from result.status=SUCCESS → 0
+    assert exit_code == 0
+
+    # Env vars correctly set for _terminate_pid_tree verification
+    assert captured_env.get("MAGY_REVIEW_ID") == start_res.review_id
+    assert captured_env.get("MAGY_RUN_ID") == start_res.review_id
+
+    # pty.log written with raw NDJSON (machine-readable)
+    log_content = (review_dir / "pty.log").read_text(encoding="utf-8")
+    assert '"event":"init"' in log_content
+    assert '"event":"result"' in log_content
+
+    # Human-readable rendering works correctly
+    init_event = {
+        "event": "init",
+        "conversation_id": "abc123xyz",
+        "init": {"permission_mode": "always-proceed"},
+    }
+    rendered = _render_event(init_event)
+    assert rendered is not None
+    assert "abc123xy" in rendered
+    assert "always-proceed" in rendered
+
+    agent_event = {
+        "event": "step_update",
+        "step_update": {
+            "step_type": "agent_response",
+            "state": "DONE",
+            "text_delta": "Hello!\n",
+            "duration_seconds": 2.5,
+            "usage": {"output_tokens": 10, "thinking_tokens": 5},
+        },
+    }
+    rendered = _render_event(agent_event)
+    assert rendered is not None
+    assert "Hello!" in rendered
+    assert "2.5s" in rendered
+
+    tool_active = {
+        "event": "step_update",
+        "step_update": {
+            "step_type": "tool",
+            "state": "ACTIVE",
+            "tool_name": "run_command",
+            "tool_info": {"parameters": {"CommandLine": "ls -la"}},
+        },
+    }
+    rendered = _render_event(tool_active)
+    assert rendered is not None
+    assert "run_command" in rendered
+    assert "ls -la" in rendered
+
+    result_fail = {
+        "event": "result",
+        "result": {
+            "status": "FAILURE",
+            "duration_seconds": 5.0,
+            "usage": {"total_tokens": 50},
+            "denied_actions": [],
+        },
+    }
+    rendered = _render_event(result_fail)
+    assert rendered is not None
+    assert "FAILURE" in rendered
+
+
+def test_runner_failure_status_returns_nonzero(
+    mock_environment, git_repo: Path, monkeypatch
+):
+    """result.status != SUCCESS → runner exits 1."""
+    import io
 
     from magy.review_runner import run_review_runner
 
-    start_res = start_review_run("Cancel env test", workspace=str(git_repo))
+    start_res = start_review_run("Failure status test", workspace=str(git_repo))
     review_dir = get_review_dir(start_res.review_id)
 
-    # Patch runner to capture env without actually spawning agy
-    captured_env = {}
+    fake_ndjson = "\n".join(
+        [
+            '{"event":"result","result":{"status":"FAILURE","duration_seconds":1.0,"num_turns":1,"usage":{"total_tokens":10}}}',
+            "",
+        ]
+    )
 
-    def fake_spawn(cmd, master_read=None):
-        captured_env.update(os.environ.copy())
-        return 0  # os.waitstatus_to_exitcode(0) is 0
+    class FakeProc:
+        stdout = io.StringIO(fake_ndjson)
+        returncode = 1
 
-    def fake_waitstatus(status):
-        return 0
+        def wait(self):
+            return 1
 
-    import pty as pty_mod
+    monkeypatch.setattr(
+        "magy.review_runner.subprocess.Popen", lambda *a, **kw: FakeProc()
+    )
 
-    monkeypatch.setattr(pty_mod, "spawn", fake_spawn)
-    monkeypatch.setattr(os, "waitstatus_to_exitcode", fake_waitstatus)
-
-    run_review_runner(str(review_dir))
-
-    assert captured_env.get("MAGY_REVIEW_ID") == start_res.review_id
-    assert captured_env.get("MAGY_RUN_ID") == start_res.review_id
+    exit_code = run_review_runner(str(review_dir))
+    assert exit_code == 1

@@ -41,7 +41,7 @@ Milestone 4 completes the quality hardening, automated test matrix, security rev
   - Emitted `[magy] using profile: vu2371992` to stderr and returned `1.2.6` to stdout.
 
 ### M4-S3: Security Review
-- Authored [`docs/security-review.md`](file:///home/vudinhn/repos/magy/docs/security-review.md):
+- Authored [`docs/architecture/security.md`](../../../architecture/security.md):
   - Documented zero credential introspection and token exclusion.
   - Path traversal and profile identifier injection protections (`validate_identifier`).
   - Settings synchronization safeguards (strict allowlist, symlink escape prevention, destination symlink rejection, inode verification).
@@ -50,7 +50,7 @@ Milestone 4 completes the quality hardening, automated test matrix, security rev
   - MCP auto-approval cautionary notice.
 
 ### M4-S4: User Documentation
-- Replaced scaffold [`README.md`](file:///home/vudinhn/repos/magy/README.md) with comprehensive product documentation:
+- Replaced scaffold [`README.md`](../../../../README.md) with comprehensive product documentation:
   - Installation via `uv tool install` and local development instructions.
   - Profile commands (`add`, `create`, `auth`, `run`, `list`, `show`, `enable`, `disable`, `reset-health`, `remove`, and `--current` flag).
   - Automatic round-robin and explicit launcher examples.
@@ -61,7 +61,7 @@ Milestone 4 completes the quality hardening, automated test matrix, security rev
   - Provider terms and disclaimer.
 
 ### M4-S5: Compatibility Report & Doctor Integration
-- Authored [`docs/compatibility.md`](file:///home/vudinhn/repos/magy/docs/compatibility.md):
+- Authored [`docs/architecture/compatibility.md`](../../../architecture/compatibility.md):
   - Documented verified Agy versions (`1.2.x`, `1.1.x`, `1.0.x`).
   - Documented OS and runtime matrix.
   - Documented storage format assumptions and warnings regarding undocumented upstream changes.
@@ -98,6 +98,6 @@ Milestone 4 completes the quality hardening, automated test matrix, security rev
 | **Live Doctor** | PASS | `magy doctor` verified system, roots, Agy 1.2.6 compatibility note |
 | **Live MCP** | PASS | `magy_profiles` called via stdio client on `magy-mcp` |
 | **Live Passthrough** | PASS | `magy -p vu2371992 -- --version` executed in isolated home |
-| **Security Review** | PASS | Documented in `docs/security-review.md` |
-| **Compatibility Report** | PASS | Documented in `docs/compatibility.md` |
-| **Product README** | PASS | Documented in `README.md` |
+| **Security Review** | PASS | Documented in [`docs/architecture/security.md`](../../../architecture/security.md) |
+| **Compatibility Report** | PASS | Documented in [`docs/architecture/compatibility.md`](../../../architecture/compatibility.md) |
+| **Product README** | PASS | Documented in [`README.md`](../../../../README.md) |

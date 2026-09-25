@@ -8,7 +8,7 @@ if unsatisfied, and continue with a follow-up prompt that preserves conversation
 context. The workflow returns a durable Git diff after each run. The harness
 agent drives the loop; no interactive shell fallback is needed.
 
-This is a planning document only. Implementation begins after explicit approval.
+**Status: Implemented.** Delivered in Milestone 4 and integrated into `src/magy/reviews.py`, `src/magy/review_runner.py`, and `src/magy/mcp_server.py`. Documented in [`docs/guides/mcp-configuration.md`](../../guides/mcp-configuration.md) and [`docs/architecture/overview.md`](../../architecture/overview.md).
 
 ## Execution model (revised)
 
@@ -161,7 +161,7 @@ client timeouts.
 
    Keep existing strict input validation and sanitized error behaviour.
 
-3. Update `README.md` and `docs/mcp-configuration.md` to describe Zellij
+3. Update `README.md` and [`docs/guides/mcp-configuration.md`](../../guides/mcp-configuration.md) to describe Zellij
    prerequisites, non-interactive headful behaviour, `continue_review_id`
    semantics, profile pinning, baseline exclusion, log location,
    exit/result semantics, and how the new workflow relates to existing detached

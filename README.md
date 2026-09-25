@@ -195,7 +195,7 @@ Magy includes a durable, stdio-based MCP server (`magy-mcp`) allowing agents in 
 | `magy_run_review_cancel` | Cancel a reviewed run, terminating its processes, closing the pane, and releasing repository lease. |
 | `magy_run_review_result` | Retrieve bounded chunks of the final net Git diff between baseline and final workspace trees. |
 
-For detailed documentation, see [`docs/mcp-configuration.md`](docs/mcp-configuration.md).
+For detailed documentation, see [`docs/guides/mcp-configuration.md`](docs/guides/mcp-configuration.md).
 
 `magy_run_headful` requires the Magy MCP server to inherit an active Zellij
 session. Its output stays in the new pane. It defaults to
@@ -223,7 +223,16 @@ Magy is an independent orchestration utility and is not affiliated with or endor
 
 ## Documentation
 
-- [MCP Server Setup & Tools](docs/mcp-configuration.md)
-- [Compatibility Report](docs/compatibility.md)
-- [Security Review & Threat Model](docs/security-review.md)
-- [Milestone Implementation Plans](docs/plans/v1/README.md)
+### Guides
+- [MCP Server Setup & Tools](docs/guides/mcp-configuration.md): Configuration for Codex and OpenCode, tool catalog, and Zellij review workflow.
+- [Windows Verification & Testing](docs/guides/windows-testing.md): Native Windows setup, test execution, and manual OAuth authentication procedure.
+
+### Architecture
+- [System Architecture Overview](docs/architecture/overview.md): System components, profile isolation, settings synchronization, concurrency, and durable execution model.
+- [Security Architecture & Threat Model](docs/architecture/security.md): Threat analysis, trust boundaries, symlink traversal prevention, PID reuse defenses, and permissions.
+- [Compatibility Architecture](docs/architecture/compatibility.md): Platform matrix, Python versions, Agy compatibility and diagnostic evaluation.
+
+### Plans & Roadmaps
+- [v1 Milestone Roadmap](docs/plans/v1/README.md): Completed v1 foundation, profile isolation, routing, durable MCP, and hardening release plans.
+- [Backlog](docs/plans/backlog.md): Active and deferred engineering backlog items.
+- [Milestone Verification Reports](docs/plans/v1/verification/README.md): Historical milestone audit logs and exit verification reports.

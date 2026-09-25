@@ -50,7 +50,7 @@
 
 ## 3. Review Remediation (Post M0-Review)
 
-Remediated findings from `docs/verification/m0-review.md`:
+Remediated findings from [`m0-review.md`](m0-review.md):
 - **F1 (Identifier validation accepts trailing newline):** Changed `IDENTIFIER_PATTERN` to `\A[a-zA-Z0-9_-]+\Z` and switched to `IDENTIFIER_PATTERN.fullmatch(name)`. Added tests for trailing/embedded newlines, carriage returns, tabs, null bytes, and control characters in `tests/test_storage.py`.
 - **F2 (Partial writes in atomic replacement):** Updated `atomic_write_json` to write in a loop until all bytes are written, fsync the file descriptor before closing, and fsync the parent directory on POSIX after `os.replace`. Added `test_atomic_write_partial_writes` monkeypatching `os.write` to chunk at 3 bytes per call.
 - **F3 (Invalid config handling in doctor):** Added validation in `MagyConfig.__post_init__` requiring `agy_cmd` to be a non-empty string or null. Implemented `load_config_result()` capturing parse errors, lock timeouts, permission errors, and invalid schema, and surfaced bounded `config_error` in `magy doctor` (both text and JSON outputs). Added tests in `tests/test_doctor.py` covering malformed JSON, invalid types, empty strings, and lock timeouts.

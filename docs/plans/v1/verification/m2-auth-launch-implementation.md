@@ -2,10 +2,8 @@
 
 ## 1. Scope and Implementation Summary
 
-This implementation delivers Option 1 (Focused auth-launch remediation) specified in
-[`docs/plans/v1/milestone-2-auth-launch-remediation.md`](../plans/v1/milestone-2-auth-launch-remediation.md)
-to resolve issues H6, H7, and H8 identified during the global installation auth harness in
-[`docs/verification/m2-auth-launch-harness.md`](m2-auth-launch-harness.md).
+This implementation delivers Option 1 (Focused auth-launch remediation)
+to resolve issues H6, H7, and H8 (direct executable discovery, resolver protocol, stream inheritance).
 
 ### M2-A1 & M2-A2: Direct Executable Discovery and Resolver Configuration
 - **Preserved Lexical Candidate Identity**:
@@ -114,4 +112,4 @@ Conducted end-to-end smoke test using a temporary isolated UV tool directory (`U
 
 ## 4. Handoff for Independent Review
 
-All automated verification gates and smoke tests for Option 1 have passed. Per project guidelines, M2 review status in `docs/verification/m2-review.md` remains unchanged awaiting independent evaluation.
+All automated verification gates and smoke tests for Option 1 have passed. Per project guidelines, M2 review status in [`m2-review.md`](m2-review.md) remains unchanged awaiting independent evaluation.
