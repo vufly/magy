@@ -14,7 +14,7 @@ from magy.profiles import add_profile
 from magy.runs import get_run_dir
 
 
-def test_mcp_server_registers_all_six_tools():
+def test_mcp_server_registers_all_tools():
     async def _test():
         server = create_mcp_server()
         tools = await server.list_tools()
@@ -22,6 +22,7 @@ def test_mcp_server_registers_all_six_tools():
 
         expected_tools = {
             "magy_run_start",
+            "magy_run_headful",
             "magy_run_wait",
             "magy_run_status",
             "magy_run_result",
@@ -35,10 +36,49 @@ def test_mcp_server_registers_all_six_tools():
         assert "--dangerously-skip-permissions" in start_tool.description
         assert start_tool.input_schema["additionalProperties"] is False
         assert start_tool.output_schema is not None
+        headful_tool = next(t for t in tools if t.name == "magy_run_headful")
+        assert "Zellij" in headful_tool.description
+        assert "auto_approval" in headful_tool.description
+        assert (
+            headful_tool.input_schema["properties"]["auto_approval"]["default"] is True
+        )
+        assert headful_tool.input_schema["additionalProperties"] is False
+        assert headful_tool.output_schema is not None
         result_tool = next(t for t in tools if t.name == "magy_run_result")
         limit_schema = result_tool.input_schema["properties"]["limit"]
         assert limit_schema["minimum"] == 4
         assert limit_schema["maximum"] == 1024 * 1024
+
+    asyncio.run(_test())
+
+
+def test_mcp_headful_launch(monkeypatch):
+    import magy.mcp_server
+    from magy.headful import HeadfulRun
+
+    captured = {}
+
+    def fake_start_headful_run(**kwargs):
+        captured.update(kwargs)
+        return HeadfulRun(
+            profile="headful-p1",
+            session="test-session",
+            pane_id="terminal_42",
+            workspace="/tmp/workspace",
+        )
+
+    monkeypatch.setattr(magy.mcp_server, "start_headful_run", fake_start_headful_run)
+
+    async def _test():
+        server = create_mcp_server()
+        result = await server.call_tool(
+            "magy_run_headful",
+            {"prompt": "Review read-only"},
+        )
+        assert result.is_error is False
+        assert result.structured_content["pane_id"] == "terminal_42"
+        assert result.structured_content["session"] == "test-session"
+        assert captured["auto_approval"] is True
 
     asyncio.run(_test())
 

@@ -149,6 +149,7 @@ Magy includes a durable, stdio-based MCP server (`magy-mcp`) allowing agents in 
 ### Features
 - **Detached Execution**: Worker runs execute detached from the MCP server. Reconnecting or restarting your editor does not kill in-flight jobs.
 - **Status & Results**: Poll progress, stream logs, or wait synchronously with short-polling.
+- **Headful Sessions**: Open an interactive Agy session in a Zellij pane through MCP.
 - **Process Cleanup**: Cancelling a run terminates the worker process and its entire descendant process tree cleanly.
 
 ### Configuration
@@ -181,6 +182,7 @@ Magy includes a durable, stdio-based MCP server (`magy-mcp`) allowing agents in 
 | Tool | Description |
 | :--- | :--- |
 | `magy_run_start` | Queue and start a prompt execution. Supports optional profile name and timeout. |
+| `magy_run_headful` | Start an interactive Agy session in a split pane in the active Zellij session; returns pane metadata. |
 | `magy_run_status` | Retrieve execution state, running time, exit status, and error classification. |
 | `magy_run_wait` | Wait for a run to finish with timeout and configurable polling interval. |
 | `magy_run_result` | Retrieve full stdout, stderr, or structured output once completed. |
@@ -188,6 +190,11 @@ Magy includes a durable, stdio-based MCP server (`magy-mcp`) allowing agents in 
 | `magy_profiles` | List configured profiles and their current health status. |
 
 For detailed documentation, see [`docs/mcp-configuration.md`](docs/mcp-configuration.md).
+
+`magy_run_headful` requires the Magy MCP server to inherit an active Zellij
+session. Its output stays in the new pane. It defaults to
+`auto_approval=true`; set `auto_approval=false` to approve tool requests in the
+pane.
 
 ---
 

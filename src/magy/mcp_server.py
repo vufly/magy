@@ -8,6 +8,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field, StrictBool
 
+from magy.headful import HeadfulRun, start_headful_run
 from magy.profiles import load_profiles
 from magy.routing import get_routing_status
 from magy.runs import (
@@ -152,6 +153,48 @@ def create_mcp_server() -> MCPServer:
             )
         except Exception as exc:
             _raise_tool_error("Run could not be started", exc)
+
+    @server.tool(
+        name="magy_run_headful",
+        description=(
+            "Open an interactive Agy session in a split pane in the active Zellij "
+            "session. The pane owns live output and interaction; this tool returns "
+            "pane metadata immediately and does not capture its result. Requires "
+            "OpenCode's Magy MCP server to run inside Zellij. auto_approval defaults "
+            "to True and adds --dangerously-skip-permissions; set it to False to "
+            "approve tool requests interactively in the pane."
+        ),
+        structured_output=True,
+    )
+    def handle_magy_run_headful(
+        prompt: Annotated[str, Field(min_length=1)],
+        workspace: str | None = None,
+        profile: str | None = None,
+        model: str | None = None,
+        agent: str | None = None,
+        effort: str | None = None,
+        mode: str | None = None,
+        sandbox: StrictBool | None = None,
+        additional_dirs: list[str] | None = None,
+        auto_approval: StrictBool = True,
+    ) -> HeadfulRun:
+        try:
+            return start_headful_run(
+                prompt=prompt,
+                workspace=workspace,
+                profile=profile,
+                model=model,
+                agent=agent,
+                effort=effort,
+                mode=mode,
+                sandbox=sandbox,
+                additional_dirs=additional_dirs,
+                auto_approval=auto_approval,
+            )
+        except (RuntimeError, ValueError) as exc:
+            _raise_tool_error(str(exc), exc)
+        except Exception as exc:
+            _raise_tool_error("Headful run could not be started", exc)
 
     @server.tool(
         name="magy_run_wait",

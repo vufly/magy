@@ -85,6 +85,7 @@ Once configured, the following tools are available through MCP:
 | Tool | Purpose | Key Parameters |
 | --- | --- | --- |
 | `magy_run_start` | Start a detached, asynchronous Agy run | `prompt` (required), `workspace`, `profile`, `timeout`, `auto_approval`, `idempotency_key` |
+| `magy_run_headful` | Open interactive Agy in a split pane in active Zellij session; returns pane metadata immediately | `prompt` (required), `workspace`, `profile`, `model`, `agent`, `effort`, `mode`, `sandbox`, `additional_dirs`, `auto_approval` |
 | `magy_run_wait` | Short-poll until a run completes or times out | `run_id`, `timeout` (default 20s, max 60s) |
 | `magy_run_status` | Query safe run status | `run_id` |
 | `magy_run_result` | Retrieve bounded output chunks with stable offsets | `run_id`, `offset` (default 0), `limit` (default 64 KiB) |
@@ -95,3 +96,11 @@ Once configured, the following tools are available through MCP:
 > `magy_run_start` defaults to `auto_approval=True` (`--dangerously-skip-permissions`)
 > to enable unattended headless delegation. Set `auto_approval=False` if tool
 > actions require interactive approval.
+
+`magy_run_headful` requires OpenCode and its Magy MCP server to run inside an
+active Zellij session. It opens Agy in a right split and returns the pane ID;
+live interaction and output remain in that pane, with no MCP wait/result
+capture. It also defaults to `auto_approval=True` and accepts
+`auto_approval=False` for interactive approvals in the pane. If no active
+Zellij session is available, the tool fails instead of switching to headless
+execution.
