@@ -28,6 +28,12 @@ def test_mcp_server_registers_all_tools():
             "magy_run_result",
             "magy_run_cancel",
             "magy_profiles",
+            "magy_run_review_start",
+            "magy_run_review_status",
+            "magy_run_review_wait",
+            "magy_run_review_log",
+            "magy_run_review_cancel",
+            "magy_run_review_result",
         }
         assert expected_tools == tool_names
 
@@ -48,6 +54,25 @@ def test_mcp_server_registers_all_tools():
         limit_schema = result_tool.input_schema["properties"]["limit"]
         assert limit_schema["minimum"] == 4
         assert limit_schema["maximum"] == 1024 * 1024
+
+        review_start = next(t for t in tools if t.name == "magy_run_review_start")
+        assert "Zellij" in review_start.description
+        assert "continue_review_id" in review_start.description
+        assert "magy_run_review_cancel" in review_start.description
+        assert "magy_run_review_result" in review_start.description
+        assert (
+            review_start.input_schema["properties"]["auto_approval"]["default"] is False
+        )
+        assert review_start.input_schema["additionalProperties"] is False
+        assert review_start.output_schema is not None
+
+        review_res = next(t for t in tools if t.name == "magy_run_review_result")
+        assert review_res.input_schema["properties"]["limit"]["minimum"] == 4
+        assert review_res.input_schema["properties"]["limit"]["maximum"] == 1024 * 1024
+
+        review_log = next(t for t in tools if t.name == "magy_run_review_log")
+        assert review_log.input_schema["properties"]["limit"]["minimum"] == 4
+        assert review_log.input_schema["properties"]["limit"]["maximum"] == 1024 * 1024
 
     asyncio.run(_test())
 
@@ -396,3 +421,128 @@ def test_mcp_server_help_flag(capsys):
     assert ret2 == 0
     captured2 = capsys.readouterr()
     assert "Usage: magy-mcp" in captured2.out
+
+
+def test_mcp_review_tools_dispatch(monkeypatch):
+    import magy.mcp_server
+    from magy.reviews import (
+        ReviewDiffResult,
+        ReviewLogResult,
+        ReviewRunStart,
+        ReviewRunStatus,
+    )
+
+    fake_start = ReviewRunStart(
+        review_id="rev_test123",
+        pane_id="terminal_99",
+        profile="rev-p",
+        workspace="/test/ws",
+    )
+    fake_status = ReviewRunStatus(
+        review_id="rev_test123",
+        status="running",
+        profile="rev-p",
+        workspace="/test/ws",
+    )
+    fake_log = ReviewLogResult(
+        review_id="rev_test123",
+        status="running",
+        content="PTY chunk",
+        offset=0,
+        next_offset=9,
+        eof=False,
+    )
+    fake_diff = ReviewDiffResult(
+        review_id="rev_test123",
+        status="completed",
+        exit_code=0,
+        diff="diff --git a/f b/f",
+        offset=0,
+        next_offset=18,
+        eof=True,
+    )
+
+    monkeypatch.setattr(magy.mcp_server, "start_review_run", lambda **kw: fake_start)
+    monkeypatch.setattr(magy.mcp_server, "get_review_status", lambda rid: fake_status)
+    monkeypatch.setattr(magy.mcp_server, "get_review_log", lambda rid, **kw: fake_log)
+    monkeypatch.setattr(
+        magy.mcp_server, "get_review_result", lambda rid, **kw: fake_diff
+    )
+    monkeypatch.setattr(
+        magy.mcp_server,
+        "cancel_review_run",
+        lambda rid: ReviewRunStatus(review_id=rid, status="cancelled"),
+    )
+
+    async def _test():
+        server = create_mcp_server()
+
+        # 1. start
+        res1 = await server.call_tool(
+            "magy_run_review_start", {"prompt": "Review prompt"}
+        )
+        assert res1.is_error is False
+        assert res1.structured_content["review_id"] == "rev_test123"
+        assert res1.structured_content["pane_id"] == "terminal_99"
+
+        # 2. status
+        res2 = await server.call_tool(
+            "magy_run_review_status", {"review_id": "rev_test123"}
+        )
+        assert res2.is_error is False
+        assert res2.structured_content["status"] == "running"
+
+        # 3. log
+        res3 = await server.call_tool(
+            "magy_run_review_log",
+            {"review_id": "rev_test123", "offset": 0, "limit": 100},
+        )
+        assert res3.is_error is False
+        assert res3.structured_content["content"] == "PTY chunk"
+
+        # 4. result
+        res4 = await server.call_tool(
+            "magy_run_review_result",
+            {"review_id": "rev_test123", "offset": 0, "limit": 100},
+        )
+        assert res4.is_error is False
+        assert "diff --git" in res4.structured_content["diff"]
+
+        # 5. cancel
+        res5 = await server.call_tool(
+            "magy_run_review_cancel", {"review_id": "rev_test123"}
+        )
+        assert res5.is_error is False
+        assert res5.structured_content["status"] == "cancelled"
+
+    asyncio.run(_test())
+
+
+def test_mcp_review_sanitized_errors(monkeypatch):
+    import magy.mcp_server
+
+    def fake_start(**kw):
+        raise ValueError("Workspace is not inside a git repository")
+
+    monkeypatch.setattr(magy.mcp_server, "start_review_run", fake_start)
+
+    async def _test():
+        server = create_mcp_server()
+
+        # Controlled ValueError passed through
+        with pytest.raises(ToolError, match="Workspace is not inside a git repository"):
+            await server.call_tool("magy_run_review_start", {"prompt": "Check errors"})
+
+        # Unknown parameter rejected by schema
+        with pytest.raises(ToolError, match="Unknown tool input property"):
+            await server.call_tool(
+                "magy_run_review_start", {"prompt": "Check", "bad_param": "val"}
+            )
+
+        # Non-boolean auto_approval rejected
+        with pytest.raises(ToolError, match="auto_approval must be a boolean"):
+            await server.call_tool(
+                "magy_run_review_start", {"prompt": "Check", "auto_approval": "yes"}
+            )
+
+    asyncio.run(_test())

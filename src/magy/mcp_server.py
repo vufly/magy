@@ -10,6 +10,18 @@ from pydantic import Field, StrictBool
 
 from magy.headful import HeadfulRun, start_headful_run
 from magy.profiles import load_profiles
+from magy.reviews import (
+    TERMINAL_REVIEW_STATUSES,
+    ReviewDiffResult,
+    ReviewLogResult,
+    ReviewRunStart,
+    ReviewRunStatus,
+    cancel_review_run,
+    get_review_log,
+    get_review_result,
+    get_review_status,
+    start_review_run,
+)
 from magy.routing import get_routing_status
 from magy.runs import (
     MAX_RESULT_CHUNK_BYTES,
@@ -301,6 +313,156 @@ def create_mcp_server() -> MCPServer:
             )
         except Exception as exc:
             _raise_tool_error("Profiles are unavailable", exc)
+
+    @server.tool(
+        name="magy_run_review_start",
+        description=(
+            "This tool executes Agy non-interactively in a user-facing Zellij pane. "
+            "The user can watch thinking and execution in real time. Supply "
+            "continue_review_id to resume a prior run's conversation on the same "
+            "profile. Cancel via magy_run_review_cancel if intervention is needed, "
+            "then call magy_run_review_start again with the prior review ID and a "
+            "refined prompt. The start call returns immediately; the final Git diff "
+            "is retrieved with magy_run_review_result after the run completes."
+        ),
+        structured_output=True,
+    )
+    def handle_magy_run_review_start(
+        prompt: Annotated[str, Field(min_length=1)],
+        workspace: str | None = None,
+        profile: str | None = None,
+        model: str | None = None,
+        agent: str | None = None,
+        effort: str | None = None,
+        mode: str | None = None,
+        sandbox: StrictBool | None = None,
+        additional_dirs: list[str] | None = None,
+        auto_approval: StrictBool = False,
+        continue_review_id: str | None = None,
+    ) -> ReviewRunStart:
+        try:
+            return start_review_run(
+                prompt=prompt,
+                workspace=workspace,
+                profile=profile,
+                model=model,
+                agent=agent,
+                effort=effort,
+                mode=mode,
+                sandbox=sandbox,
+                additional_dirs=additional_dirs,
+                auto_approval=auto_approval,
+                continue_review_id=continue_review_id,
+            )
+        except (RuntimeError, ValueError) as exc:
+            _raise_tool_error(str(exc), exc)
+        except Exception as exc:
+            _raise_tool_error("Review run could not be started", exc)
+
+    @server.tool(
+        name="magy_run_review_status",
+        description=(
+            "Get the current status of a reviewed execution run. "
+            "Omits prompt, raw commands, and secret paths."
+        ),
+        structured_output=True,
+    )
+    def handle_magy_run_review_status(review_id: str) -> ReviewRunStatus:
+        try:
+            return get_review_status(review_id)
+        except (RuntimeError, ValueError) as exc:
+            _raise_tool_error(str(exc), exc)
+        except Exception as exc:
+            _raise_tool_error("Review run status is unavailable", exc)
+
+    @server.tool(
+        name="magy_run_review_wait",
+        description=(
+            "Wait for a reviewed execution run to finish or reach terminal state, "
+            "returning its current status. Clamped to safe MCP timeout limits "
+            "(0.1s to 60s) to prevent gateway timeouts."
+        ),
+        structured_output=True,
+    )
+    async def handle_magy_run_review_wait(
+        review_id: str,
+        timeout: float = 20.0,
+    ) -> ReviewRunStatus:
+        try:
+            clamped_timeout = max(0.1, min(float(timeout), 60.0))
+            deadline = time.monotonic() + clamped_timeout
+            while time.monotonic() < deadline:
+                status = await asyncio.to_thread(get_review_status, review_id)
+                if status.status in TERMINAL_REVIEW_STATUSES:
+                    return status
+                await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+            return await asyncio.to_thread(get_review_status, review_id)
+        except (RuntimeError, ValueError) as exc:
+            _raise_tool_error(str(exc), exc)
+        except Exception as exc:
+            _raise_tool_error("Review run could not be waited", exc)
+
+    @server.tool(
+        name="magy_run_review_log",
+        description=(
+            "Retrieve bounded UTF-8 output chunks with stable byte offsets from a "
+            "reviewed execution run's PTY log for mid-run monitoring."
+        ),
+        structured_output=True,
+    )
+    def handle_magy_run_review_log(
+        review_id: str,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[
+            int,
+            Field(ge=MIN_RESULT_CHUNK_BYTES, le=MAX_RESULT_CHUNK_BYTES),
+        ] = 65536,
+    ) -> ReviewLogResult:
+        try:
+            return get_review_log(review_id, offset=offset, limit=limit)
+        except (RuntimeError, ValueError) as exc:
+            _raise_tool_error(str(exc), exc)
+        except Exception as exc:
+            _raise_tool_error("Review log is unavailable", exc)
+
+    @server.tool(
+        name="magy_run_review_cancel",
+        description=(
+            "Cancel a reviewed execution run, terminating its process tree, "
+            "closing its Zellij pane, and releasing its repository lease."
+        ),
+        structured_output=True,
+    )
+    def handle_magy_run_review_cancel(review_id: str) -> ReviewRunStatus:
+        try:
+            return cancel_review_run(review_id)
+        except (RuntimeError, ValueError) as exc:
+            _raise_tool_error(str(exc), exc)
+        except Exception as exc:
+            _raise_tool_error("Review run could not be cancelled", exc)
+
+    @server.tool(
+        name="magy_run_review_result",
+        description=(
+            "Retrieve bounded chunks of the final Git diff with stable byte offsets "
+            "after a reviewed execution run completes."
+        ),
+        structured_output=True,
+    )
+    def handle_magy_run_review_result(
+        review_id: str,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[
+            int,
+            Field(ge=MIN_RESULT_CHUNK_BYTES, le=MAX_RESULT_CHUNK_BYTES),
+        ] = 65536,
+    ) -> ReviewDiffResult:
+        try:
+            return get_review_result(review_id, offset=offset, limit=limit)
+        except (RuntimeError, ValueError) as exc:
+            _raise_tool_error(str(exc), exc)
+        except Exception as exc:
+            _raise_tool_error("Review result is unavailable", exc)
 
     return server
 

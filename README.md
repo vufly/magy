@@ -188,6 +188,12 @@ Magy includes a durable, stdio-based MCP server (`magy-mcp`) allowing agents in 
 | `magy_run_result` | Retrieve full stdout, stderr, or structured output once completed. |
 | `magy_run_cancel` | Terminate an in-flight run and clean up all child processes. |
 | `magy_profiles` | List configured profiles and their current health status. |
+| `magy_run_review_start` | Start reviewed Agy execution in a floating Zellij pane with Git baseline snapshots and conversation continuation. |
+| `magy_run_review_status` | Query status (`running`, `completed`, `failed`, `cancelled`) of a reviewed run. |
+| `magy_run_review_wait` | Short-poll until a reviewed run reaches a terminal state. |
+| `magy_run_review_log` | Stream bounded PTY terminal output chunks mid-run. |
+| `magy_run_review_cancel` | Cancel a reviewed run, terminating its processes, closing the pane, and releasing repository lease. |
+| `magy_run_review_result` | Retrieve bounded chunks of the final net Git diff between baseline and final workspace trees. |
 
 For detailed documentation, see [`docs/mcp-configuration.md`](docs/mcp-configuration.md).
 
@@ -195,6 +201,11 @@ For detailed documentation, see [`docs/mcp-configuration.md`](docs/mcp-configura
 session. Its output stays in the new pane. It defaults to
 `auto_approval=true`; set `auto_approval=false` to approve tool requests in the
 pane.
+
+The `magy_run_review_*` workflow runs Agy non-interactively in a user-facing
+floating Zellij pane while providing durable Git diff capture, profile-pinned
+conversation continuation (`continue_review_id`), baseline dirty-file
+exclusion, and bounded PTY stream monitoring.
 
 ---
 

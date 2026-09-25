@@ -16,8 +16,10 @@ def isolate_environment(tmp_path_factory, monkeypatch) -> None:
     monkeypatch.setenv("MAGY_DATA_DIR", str(root / "data"))
     monkeypatch.setenv("MAGY_STATE_DIR", str(root / "state"))
 
-    # Remove any existing MAGY_AGY_CMD
+    # Remove any existing MAGY environment variables
     monkeypatch.delenv("MAGY_AGY_CMD", raising=False)
+    monkeypatch.delenv("MAGY_PROFILE", raising=False)
+    monkeypatch.delenv("MAGY_RUN_ID", raising=False)
 
     # Sanitize PATH to ensure real agy cannot be discovered by accident
     current_path = os.environ.get("PATH", "")
