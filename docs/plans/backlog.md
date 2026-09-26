@@ -1,33 +1,25 @@
-# Backlog
+# Active Engineering Backlog
 
-## Cross-platform CI verification
+This document tracks active, unresolved engineering backlog items and deferred verification tasks for Magy.
 
-- **Origin:** M0 review G3
-- **Status:** Deferred; not an M0 or M1 gate
-- **Target:** Before v1 release
+---
 
-Run the existing GitHub Actions matrix on native macOS and Windows runners for
-Python 3.11 and 3.14. Confirm the full suite passes, with specific evidence that
-Fake Agy captures selected environment variables and handles cancellation on
-both operating systems. Record and remediate any platform-specific failures.
+## Cross-Platform CI and Native OS Verification
 
-Linux coverage remains required during current milestone development. Native
-macOS and Windows verification should resume when suitable runners are
-available. See [`docs/guides/windows-testing.md`](../guides/windows-testing.md) for manual Windows verification steps.
+- **Origin:** M0 review (G3), M2/M3 cross-platform reviews
+- **Status:** Active / Deferred (requires dedicated native macOS and Windows runner environments)
+- **Target:** Post-v1 hardening
 
-## M1 follow-up hardening
+### Scope
 
-- **Origin:** M1 review follow-ups F1-F4
-- **Status:** Resolved in M1 closeout
-- **Target:** Verified before M2
+1. **Automated Matrix Verification:**
+   - Execute the configured GitHub Actions test matrix on native macOS and Windows runners (Python 3.11 and 3.14).
+   - Verify that fake Agy captures selected environment variables and handles process-tree cancellation cleanly on each platform.
 
-1. [x] Reject symlinked managed profiles roots and links through the known
-   `.gemini/antigravity-cli` credential subtree. Added external, real-home, and
-   cross-profile regression tests.
-2. [x] Replaced elapsed-time-only fake concurrency coverage with deterministic
-   simultaneous-liveness barrier evidence.
-3. [x] Implemented strict Magy CLI option parsing rejecting unknown options before
-   forwarding args.
-4. [x] Integrated metadata snapshot tool cleanly at `src/magy/testing/snapshot.py`
-   with full unit test coverage.
-5. [ ] Native Windows junction/reparse behavior tracked under cross-platform CI verification.
+2. **Native Windows Verification:**
+   - Validate process-tree termination, `kernel32.LockFileEx` lifecycle locking, and console signal dispatch under native PowerShell and Command Prompt.
+   - Confirm file ACL protections and Windows junction/reparse-point traversal safeguards.
+   - For manual testing steps, see [`docs/guides/windows-testing.md`](../guides/windows-testing.md).
+
+3. **Native macOS Verification:**
+   - Validate POSIX permission enforcement, process-group signaling, and detached descendant cleanup without `/proc` markers.

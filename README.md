@@ -237,7 +237,5 @@ Magy is an independent orchestration utility and is not affiliated with or endor
 - [Compatibility Architecture](docs/architecture/compatibility.md): Platform matrix, Python versions, Agy compatibility and diagnostic evaluation.
 
 ### Plans & Roadmaps
-- [v1 Milestone Roadmap](docs/plans/v1/README.md): Completed v1 foundation, profile isolation, routing, durable MCP, and hardening release plans.
-- [Human-in-the-Loop Review Plan](docs/plans/v1/mcp-human-in-loop-terminal-ui.md): Specification for Zellij floating pane review workflow with Git snapshots and stream monitoring.
-- [Backlog](docs/plans/backlog.md): Active and deferred engineering backlog items.
-- [Milestone Verification Reports](docs/plans/v1/verification/README.md): Historical milestone audit logs and exit verification reports.
+- [v1 Retrospective & Summary](docs/plans/v1/README.md): Completed v1 milestone history, architecture decisions, and empirical profile isolation verification evidence.
+- [Active Backlog](docs/plans/backlog.md): Active and deferred engineering backlog items.

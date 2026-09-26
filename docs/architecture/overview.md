@@ -175,12 +175,18 @@ sequenceDiagram
 
 ### Key Design Pillars:
 1. **Non-Interactive Floating Pane**: Runs `agy --print <prompt> --output-format stream-json` in a floating Zellij pane. Real-time events are parsed and rendered as human-readable progress in the pane while raw events are logged to `pty.log`. Upon completion, the runner automatically closes its execution pane; a client can open a separate pane to inspect results.
-2. **Git Baseline Dirt Exclusion**: Creates a temporary Git tree index of tracked, staged, and untracked files before launch. The final diff computed on completion excludes all pre-existing modifications:
+2. **Process Control & Rationale**: Non-interactive execution avoids fragile terminal keystroke injection (`zellij write-chars`), provides clean cancellation via process tree termination, and enables programmatic iteration through `continue_review_id`.
+3. **Review Artifact Layout**: Each review stores private state under `<state_dir>/reviews/<review-id>/`:
+   - `request.json`: invocation arguments, workspace, and prompt options.
+   - `state.json`: selected profile, baseline commit/tree IDs, status, and exit codes.
+   - `pty.log`: raw NDJSON execution stream.
+   - `.exit`: atomically published completion signal containing Agy exit code.
+4. **Git Baseline Dirt Exclusion**: Creates a temporary Git tree index of tracked, staged, and untracked files before launch. The final diff computed on completion excludes all pre-existing modifications:
    ```bash
    git diff --no-ext-diff --no-textconv --binary <baseline-tree> <final-tree>
    ```
-3. **Repository Concurrency Lease**: Exclusive lease per repository root prevents interleaved modifications from concurrent review runs.
-4. **Conversation Continuation & Profile Pinning**: Supplying `continue_review_id` pins the execution to the exact profile used previously and passes `--conversation <conversation_id>` (with `--continue` fallback), seamlessly preserving conversation context without race conditions.
+5. **Repository Concurrency Lease**: Exclusive lease per repository root prevents interleaved modifications from concurrent review runs.
+6. **Conversation Continuation & Profile Pinning**: Supplying `continue_review_id` pins the execution to the exact profile used previously and passes `--conversation <conversation_id>` (with `--continue` fallback), seamlessly preserving conversation context without race conditions.
 
 ---
 
@@ -190,5 +196,5 @@ sequenceDiagram
 - [Compatibility Architecture](compatibility.md)
 - [MCP Server Setup & Tools](../guides/mcp-configuration.md)
 - [Windows Verification & Testing](../guides/windows-testing.md)
-- [v1 Milestone Roadmap](../plans/v1/README.md)
-- [Human-in-the-Loop Review Plan](../plans/v1/mcp-human-in-loop-terminal-ui.md)
+- [v1 Retrospective & Summary](../plans/v1/README.md)
+- [Active Backlog](../plans/backlog.md)
