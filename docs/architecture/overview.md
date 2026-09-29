@@ -31,11 +31,11 @@ flowchart TD
     
     subgraph Execution ["Execution Engines"]
         Worker["Detached Worker Supervisor\n(src/magy/runs.py, worker.py)"]
-        Review["Review Workflow Runner\n(src/magy/reviews.py, review_runner.py)"]
+        Watch["Watch Workflow Runner\n(src/magy/watches.py, watch_runner.py)"]
     end
     
     MCP --> Worker
-    MCP --> Review
+    MCP --> Watch
     CLI --> Discovery
     
     subgraph Targets ["Agy Invocations"]
@@ -44,7 +44,7 @@ flowchart TD
     end
     
     Worker --> AgyP1
-    Review --> AgyP2
+    Watch --> AgyP2
 ```
 
 ---
@@ -141,25 +141,25 @@ The MCP server and background task subsystem use detached workers (`src/magy/run
 
 ---
 
-## 8. Human-in-the-Loop Review Architecture
+## 8. Watched Execution Architecture
 
-For interactive or supervised workflows, Magy provides a Zellij-backed review runner (`src/magy/reviews.py`, `src/magy/review_runner.py`):
+For interactive or supervised workflows, Magy provides a multiplexer-backed watch runner (`src/magy/watches.py`, `src/magy/watch_runner.py`):
 
 ```mermaid
 sequenceDiagram
     participant Agent as Harness Agent (MCP)
-    participant Magy as Magy Review Runner
-    participant Zellij as Floating Zellij Pane
+    participant Magy as Magy Watch Runner
+    participant Zellij as Floating Terminal Pane
     participant Git as Git Repository
     
-    Agent->>Magy: magy_run_review_start(prompt, workspace)
+    Agent->>Magy: watch_start(prompt, workspace)
     Magy->>Git: Capture baseline tree snapshot (tracked + untracked)
     Magy->>Git: Acquire exclusive repo concurrency lease
     Magy->>Zellij: Launch agy --print in floating pane
-    Magy-->>Agent: Returns review_id & pane_id immediately
+    Magy-->>Agent: Returns watch_id & pane_id immediately
     
     loop Stream Monitoring
-        Agent->>Magy: magy_run_review_log(review_id, offset)
+        Agent->>Magy: watch_log(watch_id, offset)
         Magy-->>Agent: Bounded stream log chunks (NDJSON)
     end
     
@@ -169,14 +169,14 @@ sequenceDiagram
     Magy->>Git: Release repo concurrency lease
     Magy->>Zellij: Close floating pane
     
-    Agent->>Magy: magy_run_review_result(review_id)
+    Agent->>Magy: watch_diff(watch_id)
     Magy-->>Agent: Net diff excluding pre-existing dirt
 ```
 
 ### Key Design Pillars:
-1. **Non-Interactive Floating Pane**: Runs `agy --print <prompt> --output-format stream-json` in a floating Zellij pane. Real-time events are parsed and rendered as human-readable progress in the pane while raw events are logged to `pty.log`. Upon completion, the runner automatically closes its execution pane; a client can open a separate pane to inspect results.
-2. **Process Control & Rationale**: Non-interactive execution avoids fragile terminal keystroke injection (`zellij write-chars`), provides clean cancellation via process tree termination, and enables programmatic iteration through `continue_review_id`.
-3. **Review Artifact Layout**: Each review stores private state under `<state_dir>/reviews/<review-id>/`:
+1. **Non-Interactive Floating Pane**: Runs `agy --print <prompt> --output-format stream-json` in a floating terminal pane. Real-time events are parsed and rendered as human-readable progress in the pane while raw events are logged to `pty.log`. Upon completion, the runner automatically closes its execution pane; a client can inspect diffs via `watch_diff`.
+2. **Process Control & Rationale**: Non-interactive execution avoids fragile terminal keystroke injection (`zellij write-chars`), provides clean cancellation via process tree termination, and enables programmatic iteration through `continue_watch_id`.
+3. **Watch Artifact Layout**: Each watch run stores private state under `<state_dir>/watches/<watch-id>/`:
    - `request.json`: invocation arguments, workspace, and prompt options.
    - `state.json`: selected profile, baseline commit/tree IDs, status, and exit codes.
    - `pty.log`: raw NDJSON execution stream.
@@ -185,8 +185,8 @@ sequenceDiagram
    ```bash
    git diff --no-ext-diff --no-textconv --binary <baseline-tree> <final-tree>
    ```
-5. **Repository Concurrency Lease**: Exclusive lease per repository root prevents interleaved modifications from concurrent review runs.
-6. **Conversation Continuation & Profile Pinning**: Supplying `continue_review_id` pins the execution to the exact profile used previously and passes `--conversation <conversation_id>` (with `--continue` fallback), seamlessly preserving conversation context without race conditions.
+5. **Repository Concurrency Lease**: Exclusive lease per repository root prevents interleaved modifications from concurrent watch runs.
+6. **Conversation Continuation & Profile Pinning**: Supplying `continue_watch_id` pins the execution to the exact profile used previously and passes `--conversation <conversation_id>` (with `--continue` fallback), seamlessly preserving conversation context without race conditions.
 
 ---
 

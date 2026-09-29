@@ -230,7 +230,7 @@ Magy is an independent orchestration utility and is not affiliated with or endor
 ## Documentation
 
 ### Guides
-- [MCP Server Setup & Tools](docs/guides/mcp-configuration.md): Configuration for Codex and OpenCode, tool catalog, and Zellij review workflow.
+- [MCP Server Setup & Tools](docs/guides/mcp-configuration.md): Configuration for Codex and OpenCode, tool catalog, and Zellij watch workflow.
 - [Windows Verification & Testing](docs/guides/windows-testing.md): Native Windows setup, test execution, and manual OAuth authentication procedure.
 
 ### Architecture

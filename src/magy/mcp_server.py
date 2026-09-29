@@ -10,18 +10,6 @@ from pydantic import Field, StrictBool
 
 from magy.headful import HeadfulRun, start_headful_run
 from magy.profiles import load_profiles
-from magy.reviews import (
-    TERMINAL_REVIEW_STATUSES,
-    ReviewDiffResult,
-    ReviewLogResult,
-    ReviewRunStart,
-    ReviewRunStatus,
-    cancel_review_run,
-    get_review_log,
-    get_review_result,
-    get_review_status,
-    start_review_run,
-)
 from magy.routing import get_routing_status
 from magy.runs import (
     MAX_RESULT_CHUNK_BYTES,
@@ -34,23 +22,18 @@ from magy.runs import (
     get_run_status,
     start_run,
 )
-
-
-LEGACY_TOOL_ALIASES: dict[str, str] = {
-    "magy_run_start": "run_start",
-    "magy_run_headful": "pane_start",
-    "magy_run_wait": "run_wait",
-    "magy_run_status": "run_status",
-    "magy_run_result": "run_result",
-    "magy_run_cancel": "run_cancel",
-    "magy_profiles": "profiles",
-    "magy_run_review_start": "watch_start",
-    "magy_run_review_status": "watch_status",
-    "magy_run_review_wait": "watch_wait",
-    "magy_run_review_log": "watch_log",
-    "magy_run_review_cancel": "watch_cancel",
-    "magy_run_review_result": "watch_diff",
-}
+from magy.watches import (
+    TERMINAL_WATCH_STATUSES,
+    WatchDiffResult,
+    WatchLogResult,
+    WatchRunStart,
+    WatchRunStatus,
+    cancel_watch_run,
+    get_watch_log,
+    get_watch_result,
+    get_watch_status,
+    start_watch_run,
+)
 
 
 class StrictMCPServer(MCPServer):
@@ -64,12 +47,11 @@ class StrictMCPServer(MCPServer):
         return tools
 
     async def call_tool(self, name, arguments, context=None):
-        canonical_name = LEGACY_TOOL_ALIASES.get(name, name)
         tool = next(
             (
                 candidate
                 for candidate in await self.list_tools()
-                if candidate.name == canonical_name
+                if candidate.name == name
             ),
             None,
         )
@@ -107,7 +89,7 @@ class StrictMCPServer(MCPServer):
             ):
                 raise ToolError("mux_cmd must be an array of strings")
 
-        return await super().call_tool(canonical_name, arguments, context)
+        return await super().call_tool(name, arguments, context)
 
 
 @dataclass
@@ -197,10 +179,11 @@ def create_mcp_server() -> MCPServer:
         name="pane_start",
         description=(
             "Open an interactive Agy session in a split pane in the active Zellij "
-            "session or custom terminal multiplexer. The pane owns live output and interaction; "
-            "this tool returns pane metadata immediately and does not capture its result. "
-            "auto_approval defaults to True and adds --dangerously-skip-permissions; set it to "
-            "False to approve tool requests interactively in the pane."
+            "session or custom terminal multiplexer. The pane owns live output and "
+            "interaction; this tool returns pane metadata immediately and does not "
+            "capture its result. auto_approval defaults to True and adds "
+            "--dangerously-skip-permissions; set it to False to approve tool requests "
+            "interactively in the pane."
         ),
         structured_output=True,
     )
@@ -347,12 +330,13 @@ def create_mcp_server() -> MCPServer:
     @server.tool(
         name="watch_start",
         description=(
-            "This tool executes Agy non-interactively in a user-facing terminal pane (Zellij "
-            "or custom multiplexer). The user can watch thinking and execution in real time. "
-            "Supply continue_watch_id (or continue_review_id) to resume a prior run's conversation "
-            "on the same profile. Cancel via watch_cancel if intervention is needed, then call "
-            "watch_start again with the prior watch ID and a refined prompt. The start call "
-            "returns immediately; the final Git diff is retrieved with watch_diff after the run completes."
+            "This tool executes Agy non-interactively in a user-facing terminal "
+            "pane (Zellij or custom multiplexer). The user can watch thinking and "
+            "execution in real time. Supply continue_watch_id to resume a prior "
+            "run's conversation on the same profile. Cancel via watch_cancel if "
+            "intervention is needed, then call watch_start again with the prior "
+            "watch ID and a refined prompt. The start call returns immediately; "
+            "the final Git diff is retrieved with watch_diff after completion."
         ),
         structured_output=True,
     )
@@ -368,12 +352,11 @@ def create_mcp_server() -> MCPServer:
         additional_dirs: list[str] | None = None,
         auto_approval: StrictBool = False,
         continue_watch_id: str | None = None,
-        continue_review_id: str | None = None,
         mux: str = "auto",
         mux_cmd: list[str] | None = None,
-    ) -> ReviewRunStart:
+    ) -> WatchRunStart:
         try:
-            return start_review_run(
+            return start_watch_run(
                 prompt=prompt,
                 workspace=workspace,
                 profile=profile,
@@ -384,7 +367,6 @@ def create_mcp_server() -> MCPServer:
                 sandbox=sandbox,
                 additional_dirs=additional_dirs,
                 auto_approval=auto_approval,
-                continue_review_id=continue_review_id,
                 continue_watch_id=continue_watch_id,
                 mux=mux,
                 mux_cmd=mux_cmd,
@@ -403,14 +385,10 @@ def create_mcp_server() -> MCPServer:
         structured_output=True,
     )
     def handle_watch_status(
-        watch_id: str | None = None,
-        review_id: str | None = None,
-    ) -> ReviewRunStatus:
-        target_id = watch_id or review_id
-        if not target_id:
-            raise ToolError("watch_id is required")
+        watch_id: str,
+    ) -> WatchRunStatus:
         try:
-            return get_review_status(target_id)
+            return get_watch_status(watch_id)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
@@ -426,22 +404,18 @@ def create_mcp_server() -> MCPServer:
         structured_output=True,
     )
     async def handle_watch_wait(
-        watch_id: str | None = None,
-        review_id: str | None = None,
+        watch_id: str,
         timeout: float = 20.0,
-    ) -> ReviewRunStatus:
-        target_id = watch_id or review_id
-        if not target_id:
-            raise ToolError("watch_id is required")
+    ) -> WatchRunStatus:
         try:
             clamped_timeout = max(0.1, min(float(timeout), 60.0))
             deadline = time.monotonic() + clamped_timeout
             while time.monotonic() < deadline:
-                status = await asyncio.to_thread(get_review_status, target_id)
-                if status.status in TERMINAL_REVIEW_STATUSES:
+                status = await asyncio.to_thread(get_watch_status, watch_id)
+                if status.status in TERMINAL_WATCH_STATUSES:
                     return status
                 await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-            return await asyncio.to_thread(get_review_status, target_id)
+            return await asyncio.to_thread(get_watch_status, watch_id)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
@@ -456,19 +430,15 @@ def create_mcp_server() -> MCPServer:
         structured_output=True,
     )
     def handle_watch_log(
-        watch_id: str | None = None,
-        review_id: str | None = None,
+        watch_id: str,
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[
             int,
             Field(ge=MIN_RESULT_CHUNK_BYTES, le=MAX_RESULT_CHUNK_BYTES),
         ] = 65536,
-    ) -> ReviewLogResult:
-        target_id = watch_id or review_id
-        if not target_id:
-            raise ToolError("watch_id is required")
+    ) -> WatchLogResult:
         try:
-            return get_review_log(target_id, offset=offset, limit=limit)
+            return get_watch_log(watch_id, offset=offset, limit=limit)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
@@ -483,14 +453,10 @@ def create_mcp_server() -> MCPServer:
         structured_output=True,
     )
     def handle_watch_cancel(
-        watch_id: str | None = None,
-        review_id: str | None = None,
-    ) -> ReviewRunStatus:
-        target_id = watch_id or review_id
-        if not target_id:
-            raise ToolError("watch_id is required")
+        watch_id: str,
+    ) -> WatchRunStatus:
         try:
-            return cancel_review_run(target_id)
+            return cancel_watch_run(watch_id)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
@@ -505,19 +471,15 @@ def create_mcp_server() -> MCPServer:
         structured_output=True,
     )
     def handle_watch_diff(
-        watch_id: str | None = None,
-        review_id: str | None = None,
+        watch_id: str,
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[
             int,
             Field(ge=MIN_RESULT_CHUNK_BYTES, le=MAX_RESULT_CHUNK_BYTES),
         ] = 65536,
-    ) -> ReviewDiffResult:
-        target_id = watch_id or review_id
-        if not target_id:
-            raise ToolError("watch_id is required")
+    ) -> WatchDiffResult:
         try:
-            return get_review_result(target_id, offset=offset, limit=limit)
+            return get_watch_result(watch_id, offset=offset, limit=limit)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:

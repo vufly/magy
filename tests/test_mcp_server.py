@@ -55,24 +55,27 @@ def test_mcp_server_registers_all_tools():
         assert limit_schema["minimum"] == 4
         assert limit_schema["maximum"] == 1024 * 1024
 
-        review_start = next(t for t in tools if t.name == "watch_start")
-        assert "terminal pane" in review_start.description or "Zellij" in review_start.description
-        assert "continue_watch_id" in review_start.description or "continue_review_id" in review_start.description
-        assert "watch_cancel" in review_start.description
-        assert "watch_diff" in review_start.description
+        watch_start = next(t for t in tools if t.name == "watch_start")
         assert (
-            review_start.input_schema["properties"]["auto_approval"]["default"] is False
+            "terminal pane" in watch_start.description
+            or "Zellij" in watch_start.description
         )
-        assert review_start.input_schema["additionalProperties"] is False
-        assert review_start.output_schema is not None
+        assert "continue_watch_id" in watch_start.description
+        assert "watch_cancel" in watch_start.description
+        assert "watch_diff" in watch_start.description
+        assert (
+            watch_start.input_schema["properties"]["auto_approval"]["default"] is False
+        )
+        assert watch_start.input_schema["additionalProperties"] is False
+        assert watch_start.output_schema is not None
 
-        review_res = next(t for t in tools if t.name == "watch_diff")
-        assert review_res.input_schema["properties"]["limit"]["minimum"] == 4
-        assert review_res.input_schema["properties"]["limit"]["maximum"] == 1024 * 1024
+        watch_res = next(t for t in tools if t.name == "watch_diff")
+        assert watch_res.input_schema["properties"]["limit"]["minimum"] == 4
+        assert watch_res.input_schema["properties"]["limit"]["maximum"] == 1024 * 1024
 
-        review_log = next(t for t in tools if t.name == "watch_log")
-        assert review_log.input_schema["properties"]["limit"]["minimum"] == 4
-        assert review_log.input_schema["properties"]["limit"]["maximum"] == 1024 * 1024
+        watch_log = next(t for t in tools if t.name == "watch_log")
+        assert watch_log.input_schema["properties"]["limit"]["minimum"] == 4
+        assert watch_log.input_schema["properties"]["limit"]["maximum"] == 1024 * 1024
 
     asyncio.run(_test())
 
@@ -98,19 +101,12 @@ def test_mcp_headful_launch(monkeypatch):
         server = create_mcp_server()
         result = await server.call_tool(
             "pane_start",
-            {"prompt": "Review read-only"},
+            {"prompt": "Headful pane test"},
         )
         assert result.is_error is False
         assert result.structured_content["pane_id"] == "terminal_42"
         assert result.structured_content["session"] == "test-session"
         assert captured["auto_approval"] is True
-
-        # Test legacy alias dispatch
-        legacy_result = await server.call_tool(
-            "magy_run_headful",
-            {"prompt": "Review read-only"},
-        )
-        assert legacy_result.is_error is False
 
     asyncio.run(_test())
 
@@ -202,10 +198,6 @@ def test_mcp_profiles():
         assert "home_dir" not in profile
         assert "incarnation_id" not in profile
         assert "available" in profile
-
-        # Legacy alias test
-        legacy_res = await server.call_tool("magy_profiles", {})
-        assert legacy_res.is_error is False
 
     asyncio.run(_test())
 
@@ -319,9 +311,7 @@ def test_mcp_stdio_worker_survives_server_restart(fake_agy, monkeypatch):
             )
             assert waited.is_error is False
             assert waited.structured_content["status"] == "timed_out"
-            result = await second_client.call_tool(
-                "run_result", {"run_id": run_id}
-            )
+            result = await second_client.call_tool("run_result", {"run_id": run_id})
             assert result.is_error is False
             assert result.structured_content["eof"] is True
 
@@ -390,9 +380,7 @@ def test_mcp_server_restart_survival():
 
     async def _test():
         server1 = create_mcp_server()
-        start_res = await server1.call_tool(
-            "run_start", {"prompt": "Restart test"}
-        )
+        start_res = await server1.call_tool("run_start", {"prompt": "Restart test"})
         run_id = json.loads(start_res.content[0].text)["run_id"]
 
         # Mark run complete on disk
@@ -434,37 +422,37 @@ def test_mcp_server_help_flag(capsys):
     assert "Usage: magy-mcp" in captured2.out
 
 
-def test_mcp_review_tools_dispatch(monkeypatch):
+def test_mcp_watch_tools_dispatch(monkeypatch):
     import magy.mcp_server
-    from magy.reviews import (
-        ReviewDiffResult,
-        ReviewLogResult,
-        ReviewRunStart,
-        ReviewRunStatus,
+    from magy.watches import (
+        WatchDiffResult,
+        WatchLogResult,
+        WatchRunStart,
+        WatchRunStatus,
     )
 
-    fake_start = ReviewRunStart(
-        review_id="rev_test123",
+    fake_start = WatchRunStart(
+        watch_id="watch_test123",
         pane_id="terminal_99",
-        profile="rev-p",
+        profile="watch-p",
         workspace="/test/ws",
     )
-    fake_status = ReviewRunStatus(
-        review_id="rev_test123",
+    fake_status = WatchRunStatus(
+        watch_id="watch_test123",
         status="running",
-        profile="rev-p",
+        profile="watch-p",
         workspace="/test/ws",
     )
-    fake_log = ReviewLogResult(
-        review_id="rev_test123",
+    fake_log = WatchLogResult(
+        watch_id="watch_test123",
         status="running",
         content="PTY chunk",
         offset=0,
         next_offset=9,
         eof=False,
     )
-    fake_diff = ReviewDiffResult(
-        review_id="rev_test123",
+    fake_diff = WatchDiffResult(
+        watch_id="watch_test123",
         status="completed",
         exit_code=0,
         diff="diff --git a/f b/f",
@@ -473,41 +461,36 @@ def test_mcp_review_tools_dispatch(monkeypatch):
         eof=True,
     )
 
-    monkeypatch.setattr(magy.mcp_server, "start_review_run", lambda **kw: fake_start)
-    monkeypatch.setattr(magy.mcp_server, "get_review_status", lambda rid: fake_status)
-    monkeypatch.setattr(magy.mcp_server, "get_review_log", lambda rid, **kw: fake_log)
+    monkeypatch.setattr(magy.mcp_server, "start_watch_run", lambda **kw: fake_start)
+    monkeypatch.setattr(magy.mcp_server, "get_watch_status", lambda wid: fake_status)
+    monkeypatch.setattr(magy.mcp_server, "get_watch_log", lambda wid, **kw: fake_log)
     monkeypatch.setattr(
-        magy.mcp_server, "get_review_result", lambda rid, **kw: fake_diff
+        magy.mcp_server, "get_watch_result", lambda wid, **kw: fake_diff
     )
     monkeypatch.setattr(
         magy.mcp_server,
-        "cancel_review_run",
-        lambda rid: ReviewRunStatus(review_id=rid, status="cancelled"),
+        "cancel_watch_run",
+        lambda wid: WatchRunStatus(watch_id=wid, status="cancelled"),
     )
 
     async def _test():
         server = create_mcp_server()
 
         # 1. start
-        res1 = await server.call_tool(
-            "watch_start", {"prompt": "Review prompt"}
-        )
+        res1 = await server.call_tool("watch_start", {"prompt": "Watch prompt"})
         assert res1.is_error is False
-        assert res1.structured_content["review_id"] == "rev_test123"
-        assert res1.structured_content["watch_id"] == "rev_test123"
+        assert res1.structured_content["watch_id"] == "watch_test123"
         assert res1.structured_content["pane_id"] == "terminal_99"
 
         # 2. status
-        res2 = await server.call_tool(
-            "watch_status", {"watch_id": "rev_test123"}
-        )
+        res2 = await server.call_tool("watch_status", {"watch_id": "watch_test123"})
         assert res2.is_error is False
         assert res2.structured_content["status"] == "running"
 
         # 3. log
         res3 = await server.call_tool(
             "watch_log",
-            {"watch_id": "rev_test123", "offset": 0, "limit": 100},
+            {"watch_id": "watch_test123", "offset": 0, "limit": 100},
         )
         assert res3.is_error is False
         assert res3.structured_content["content"] == "PTY chunk"
@@ -515,42 +498,26 @@ def test_mcp_review_tools_dispatch(monkeypatch):
         # 4. diff
         res4 = await server.call_tool(
             "watch_diff",
-            {"watch_id": "rev_test123", "offset": 0, "limit": 100},
+            {"watch_id": "watch_test123", "offset": 0, "limit": 100},
         )
         assert res4.is_error is False
         assert "diff --git" in res4.structured_content["diff"]
 
         # 5. cancel
-        res5 = await server.call_tool(
-            "watch_cancel", {"watch_id": "rev_test123"}
-        )
+        res5 = await server.call_tool("watch_cancel", {"watch_id": "watch_test123"})
         assert res5.is_error is False
         assert res5.structured_content["status"] == "cancelled"
-
-        # 6. legacy review aliases
-        legacy_res1 = await server.call_tool(
-            "magy_run_review_start", {"prompt": "Review prompt"}
-        )
-        assert legacy_res1.is_error is False
-        legacy_res2 = await server.call_tool(
-            "magy_run_review_status", {"review_id": "rev_test123"}
-        )
-        assert legacy_res2.is_error is False
-        legacy_res4 = await server.call_tool(
-            "magy_run_review_result", {"review_id": "rev_test123", "offset": 0, "limit": 100}
-        )
-        assert legacy_res4.is_error is False
 
     asyncio.run(_test())
 
 
-def test_mcp_review_sanitized_errors(monkeypatch):
+def test_mcp_watch_sanitized_errors(monkeypatch):
     import magy.mcp_server
 
     def fake_start(**kw):
         raise ValueError("Workspace is not inside a git repository")
 
-    monkeypatch.setattr(magy.mcp_server, "start_review_run", fake_start)
+    monkeypatch.setattr(magy.mcp_server, "start_watch_run", fake_start)
 
     async def _test():
         server = create_mcp_server()
@@ -587,7 +554,11 @@ def test_mcp_mux_validation():
         with pytest.raises(ToolError, match="mux must be a string"):
             await server.call_tool("watch_start", {"prompt": "test", "mux": True})
 
-        with pytest.raises(ToolError, match="Multiplexer 'invalid_mux' is not supported yet"):
-            await server.call_tool("pane_start", {"prompt": "test", "mux": "invalid_mux"})
+        with pytest.raises(
+            ToolError, match="Multiplexer 'invalid_mux' is not supported yet"
+        ):
+            await server.call_tool(
+                "pane_start", {"prompt": "test", "mux": "invalid_mux"}
+            )
 
     asyncio.run(_test())

@@ -30,12 +30,12 @@ from magy.storage import (
     validate_run_id,
 )
 
-TERMINAL_REVIEW_STATUSES = frozenset({"completed", "failed", "cancelled"})
+TERMINAL_WATCH_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 @dataclass
-class ReviewRunRequest:
-    review_id: str
+class WatchRunRequest:
+    watch_id: str
     prompt: str
     workspace: str
     repo_root: str
@@ -47,7 +47,7 @@ class ReviewRunRequest:
     sandbox: bool | None = None
     additional_dirs: list[str] | None = None
     auto_approval: bool = False
-    continue_review_id: str | None = None
+    continue_watch_id: str | None = None
     conversation_id: str | None = None
     baseline_tree: str = ""
     baseline_commit: str = ""
@@ -57,13 +57,13 @@ class ReviewRunRequest:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ReviewRunRequest":
+    def from_dict(cls, data: dict[str, Any]) -> "WatchRunRequest":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
-class ReviewRunState:
-    review_id: str
+class WatchRunState:
+    watch_id: str
     status: str = "running"
     profile: str = ""
     workspace: str = ""
@@ -89,29 +89,24 @@ class ReviewRunState:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ReviewRunState":
+    def from_dict(cls, data: dict[str, Any]) -> "WatchRunState":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
-class ReviewRunStart:
-    review_id: str
+class WatchRunStart:
+    watch_id: str
     pane_id: str
     profile: str
     workspace: str
-    watch_id: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.watch_id:
-            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
-class ReviewRunStatus:
-    review_id: str
+class WatchRunStatus:
+    watch_id: str
     status: str
     profile: str | None = None
     workspace: str | None = None
@@ -121,76 +116,61 @@ class ReviewRunStatus:
     created_at: float = 0.0
     started_at: float | None = None
     finished_at: float | None = None
-    watch_id: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.watch_id:
-            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
-class ReviewLogResult:
-    review_id: str
+class WatchLogResult:
+    watch_id: str
     status: str
     content: str = ""
     offset: int = 0
     next_offset: int = 0
     eof: bool = False
-    watch_id: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.watch_id:
-            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
-class ReviewDiffResult:
-    review_id: str
+class WatchDiffResult:
+    watch_id: str
     status: str
     exit_code: int | None = None
     diff: str = ""
     offset: int = 0
     next_offset: int = 0
     eof: bool = False
-    watch_id: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.watch_id:
-            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def validate_review_id(review_id: str) -> str:
-    """Validate review identifier format and safety."""
-    return validate_run_id(review_id)
+def validate_watch_id(watch_id: str) -> str:
+    """Validate watch identifier format and safety."""
+    return validate_run_id(watch_id)
 
 
-def get_reviews_dir() -> Path:
-    """Return root directory for review runs."""
-    d = get_state_dir() / "reviews"
+def get_watches_dir() -> Path:
+    """Return root directory for watch runs."""
+    d = get_state_dir() / "watches"
     ensure_private_directory(d)
     return d
 
 
-def get_review_dir(review_id: str) -> Path:
-    """Return validated directory path for a review run."""
-    validated = validate_review_id(review_id)
-    return get_reviews_dir() / validated
+def get_watch_dir(watch_id: str) -> Path:
+    """Return validated directory path for a watch run."""
+    validated = validate_watch_id(watch_id)
+    return get_watches_dir() / validated
 
 
-def get_review_lock(review_id: str) -> FileLock:
-    """Return FileLock for review run mutations."""
-    review_dir = get_review_dir(review_id)
-    ensure_private_directory(review_dir)
-    return get_lock(review_dir / ".review.lock")
+def get_watch_lock(watch_id: str) -> FileLock:
+    """Return FileLock for watch run mutations."""
+    watch_dir = get_watch_dir(watch_id)
+    ensure_private_directory(watch_dir)
+    return get_lock(watch_dir / ".watch.lock")
 
 
 def get_repo_leases_dir() -> Path:
@@ -206,8 +186,8 @@ def _repo_lease_path(repo_root: Path) -> Path:
     return get_repo_leases_dir() / f"{key}.json"
 
 
-def acquire_repo_lease(repo_root: Path, review_id: str) -> None:
-    """Acquire exclusive lease for a repository root among active review runs."""
+def acquire_repo_lease(repo_root: Path, watch_id: str) -> None:
+    """Acquire exclusive lease for a repository root among active watch runs."""
     lease_file = _repo_lease_path(repo_root)
     lock = get_lock(lease_file.with_suffix(".lock"))
     with lock:
@@ -215,17 +195,17 @@ def acquire_repo_lease(repo_root: Path, review_id: str) -> None:
             try:
                 data = read_json(lease_file)
                 if data and isinstance(data, dict):
-                    active_id = data.get("review_id")
-                    if active_id and active_id != review_id:
+                    active_id = data.get("watch_id")
+                    if active_id and active_id != watch_id:
                         try:
-                            prior_state = get_review_state(active_id)
+                            prior_state = get_watch_state(active_id)
                             if prior_state.status == "running":
                                 raise ValueError(
-                                    "Another reviewed run is already active for this "
+                                    "Another watched run is already active for this "
                                     "repository"
                                 )
                         except (FileNotFoundError, ValueError) as exc:
-                            if "Another reviewed run" in str(exc):
+                            if "Another watched run" in str(exc):
                                 raise
             except ValueError:
                 raise
@@ -236,22 +216,22 @@ def acquire_repo_lease(repo_root: Path, review_id: str) -> None:
         atomic_write_json(
             lease_file,
             {
-                "review_id": review_id,
+                "watch_id": watch_id,
                 "repo_root": canonical,
                 "acquired_at": time.time(),
             },
         )
 
 
-def release_repo_lease(repo_root: Path, review_id: str) -> None:
-    """Release exclusive lease for a repository root if owned by review_id."""
+def release_repo_lease(repo_root: Path, watch_id: str) -> None:
+    """Release exclusive lease for a repository root if owned by watch_id."""
     lease_file = _repo_lease_path(repo_root)
     lock = get_lock(lease_file.with_suffix(".lock"))
     with lock:
         if lease_file.exists():
             try:
                 data = read_json(lease_file)
-                if data and data.get("review_id") == review_id:
+                if data and data.get("watch_id") == watch_id:
                     lease_file.unlink(missing_ok=True)
             except Exception:
                 pass
@@ -372,11 +352,11 @@ def validate_zellij_environment() -> str:
     zellij = shutil.which("zellij")
     if zellij is None:
         raise RuntimeError(
-            "Reviewed mode requires Zellij installed and available on PATH"
+            "Watched mode requires Zellij installed and available on PATH"
         )
     if not os.environ.get("ZELLIJ") or not os.environ.get("ZELLIJ_SESSION_NAME"):
         raise RuntimeError(
-            "Reviewed mode requires Magy MCP to run inside an active Zellij session; "
+            "Watched mode requires Magy MCP to run inside an active Zellij session; "
             "start OpenCode from Zellij and reconnect its MCP server"
         )
     return zellij
@@ -431,47 +411,47 @@ def close_zellij_pane(pane_id: str) -> None:
         pass
 
 
-def get_review_request(review_id: str) -> ReviewRunRequest:
-    """Read persisted ReviewRunRequest."""
-    review_dir = get_review_dir(review_id)
-    data = read_json(review_dir / "request.json")
+def get_watch_request(watch_id: str) -> WatchRunRequest:
+    """Read persisted WatchRunRequest."""
+    watch_dir = get_watch_dir(watch_id)
+    data = read_json(watch_dir / "request.json")
     if data is None:
-        raise FileNotFoundError(f"Review request not found for '{review_id}'")
-    return ReviewRunRequest.from_dict(data)
+        raise FileNotFoundError(f"Watch request not found for '{watch_id}'")
+    return WatchRunRequest.from_dict(data)
 
 
-def get_review_state(review_id: str) -> ReviewRunState:
-    """Read persisted ReviewRunState."""
-    review_dir = get_review_dir(review_id)
-    data = read_json(review_dir / "state.json")
+def get_watch_state(watch_id: str) -> WatchRunState:
+    """Read persisted WatchRunState."""
+    watch_dir = get_watch_dir(watch_id)
+    data = read_json(watch_dir / "state.json")
     if data is None:
-        raise FileNotFoundError(f"Review state not found for '{review_id}'")
-    return ReviewRunState.from_dict(data)
+        raise FileNotFoundError(f"Watch state not found for '{watch_id}'")
+    return WatchRunState.from_dict(data)
 
 
-def update_review_state(review_id: str, updates: dict[str, Any]) -> ReviewRunState:
-    """Update fields on ReviewRunState under lock."""
-    lock = get_review_lock(review_id)
+def update_watch_state(watch_id: str, updates: dict[str, Any]) -> WatchRunState:
+    """Update fields on WatchRunState under lock."""
+    lock = get_watch_lock(watch_id)
     with lock:
-        review_dir = get_review_dir(review_id)
-        path = review_dir / "state.json"
+        watch_dir = get_watch_dir(watch_id)
+        path = watch_dir / "state.json"
         data = read_json(path)
         if data is None:
-            raise FileNotFoundError(f"Review state not found for '{review_id}'")
+            raise FileNotFoundError(f"Watch state not found for '{watch_id}'")
         data.update(updates)
         atomic_write_json(path, data)
-        return ReviewRunState.from_dict(data)
+        return WatchRunState.from_dict(data)
 
 
-def spawn_detached_monitor(review_id: str) -> subprocess.Popen[Any]:
-    """Spawn detached monitor process for review run completion."""
-    cmd = [sys.executable, "-m", "magy.review_monitor", review_id]
+def spawn_detached_monitor(watch_id: str) -> subprocess.Popen[Any]:
+    """Spawn detached monitor process for watch run completion."""
+    cmd = [sys.executable, "-m", "magy.watch_monitor", watch_id]
     popen_kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
-        "env": {**os.environ, "MAGY_REVIEW_ID": review_id},
+        "env": {**os.environ, "MAGY_WATCH_ID": watch_id},
     }
     if os.name == "nt":
         creationflags = 0
@@ -486,28 +466,28 @@ def spawn_detached_monitor(review_id: str) -> subprocess.Popen[Any]:
     return subprocess.Popen(cmd, **popen_kwargs)
 
 
-def finalize_review(
-    review_id: str,
+def finalize_watch(
+    watch_id: str,
     exit_code: int,
     *,
     error: str | None = None,
     status: str | None = None,
-) -> ReviewRunState:
-    """Finalize a review run, generating final snapshot diff and releasing lease."""
-    lock = get_review_lock(review_id)
+) -> WatchRunState:
+    """Finalize a watch run, generating final snapshot diff and releasing lease."""
+    lock = get_watch_lock(watch_id)
     with lock:
-        curr = get_review_state(review_id)
-        if curr.status in TERMINAL_REVIEW_STATUSES:
+        curr = get_watch_state(watch_id)
+        if curr.status in TERMINAL_WATCH_STATUSES:
             return curr
 
         repo_root = Path(curr.repo_root)
-        review_dir = get_review_dir(review_id)
+        watch_dir = get_watch_dir(watch_id)
 
         # Snapshot final tree and compute diff
         diff_content = ""
         snapshot_failed = False
         try:
-            temp_final_index = review_dir / f"final_index_{uuid.uuid4().hex[:8]}"
+            temp_final_index = watch_dir / f"final_index_{uuid.uuid4().hex[:8]}"
             final_tree = take_git_snapshot(repo_root, temp_final_index)
             curr.final_tree = final_tree
             diff_content = compute_git_diff(repo_root, curr.baseline_tree, final_tree)
@@ -522,7 +502,6 @@ def finalize_review(
         curr.exit_code = exit_code
         curr.finished_at = time.time()
         if snapshot_failed:
-            # Cannot trust empty diff; always treat as failure regardless of exit_code
             curr.status = "failed"
             curr.error = error
             try:
@@ -547,8 +526,8 @@ def finalize_review(
             except Exception:
                 pass
 
-        atomic_write_json(review_dir / "state.json", curr.to_dict())
-        release_repo_lease(repo_root, review_id)
+        atomic_write_json(watch_dir / "state.json", curr.to_dict())
+        release_repo_lease(repo_root, watch_id)
 
     # Close pane after lock release
     if curr.pane_id:
@@ -560,37 +539,37 @@ def finalize_review(
     return curr
 
 
-def run_review_monitor(
-    review_id: str,
+def run_watch_monitor(
+    watch_id: str,
     poll_interval: float = 0.25,
     timeout: float = 86400.0,
 ) -> int:
-    """Monitor loop polling for review exit signal or pane closure."""
-    review_dir = get_review_dir(review_id)
-    exit_file = review_dir / ".exit"
+    """Monitor loop polling for watch exit signal or pane closure."""
+    watch_dir = get_watch_dir(watch_id)
+    exit_file = watch_dir / ".exit"
     deadline = time.time() + timeout
 
     while time.time() < deadline:
         try:
-            curr = get_review_state(review_id)
+            curr = get_watch_state(watch_id)
         except Exception:
             return 1
 
-        if curr.status in TERMINAL_REVIEW_STATUSES:
+        if curr.status in TERMINAL_WATCH_STATUSES:
             return 0
 
         if exit_file.exists():
             try:
                 code = int(exit_file.read_text(encoding="utf-8").strip())
             except Exception:
-                finalize_review(
-                    review_id,
+                finalize_watch(
+                    watch_id,
                     exit_code=1,
                     error="Exit signal file is corrupted or unreadable",
                     status="failed",
                 )
                 return 1
-            finalize_review(review_id, exit_code=code)
+            finalize_watch(watch_id, exit_code=code)
             return 0
 
         if not is_pane_alive(curr.pane_id):
@@ -598,17 +577,17 @@ def run_review_monitor(
                 try:
                     code = int(exit_file.read_text(encoding="utf-8").strip())
                 except Exception:
-                    finalize_review(
-                        review_id,
+                    finalize_watch(
+                        watch_id,
                         exit_code=1,
                         error="Exit signal file is corrupted or unreadable",
                         status="failed",
                     )
                     return 1
-                finalize_review(review_id, exit_code=code)
+                finalize_watch(watch_id, exit_code=code)
             else:
-                finalize_review(
-                    review_id,
+                finalize_watch(
+                    watch_id,
                     exit_code=1,
                     error="Pane closed before execution completed",
                     status="failed",
@@ -619,7 +598,7 @@ def run_review_monitor(
     return 0
 
 
-def start_review_run(
+def start_watch_run(
     prompt: str,
     *,
     workspace: str | None = None,
@@ -631,12 +610,11 @@ def start_review_run(
     sandbox: bool | None = None,
     additional_dirs: list[str] | None = None,
     auto_approval: bool = False,
-    continue_review_id: str | None = None,
     continue_watch_id: str | None = None,
     mux: str = "auto",
     mux_cmd: list[str] | None = None,
-) -> ReviewRunStart:
-    """Start reviewed Agy run in floating Zellij pane with git snapshot baseline."""
+) -> WatchRunStart:
+    """Start watched Agy run in terminal pane with git snapshot baseline."""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Prompt cannot be empty")
     if additional_dirs is not None and any(
@@ -645,8 +623,10 @@ def start_review_run(
         raise ValueError("Additional directories must be non-empty strings")
 
     if mux_cmd is not None:
-        if not isinstance(mux_cmd, list) or not mux_cmd or any(
-            not isinstance(d, str) or not d.strip() for d in mux_cmd
+        if (
+            not isinstance(mux_cmd, list)
+            or not mux_cmd
+            or any(not isinstance(d, str) or not d.strip() for d in mux_cmd)
         ):
             raise ValueError("mux_cmd must be a non-empty list of strings")
         zellij_bin = None
@@ -654,7 +634,8 @@ def start_review_run(
         zellij_bin = validate_zellij_environment()
     else:
         raise ValueError(
-            f"Multiplexer '{mux}' is not supported yet; specify mux='zellij' or provide 'mux_cmd'"
+            f"Multiplexer '{mux}' is not supported yet; "
+            "specify mux='zellij' or provide 'mux_cmd'"
         )
 
     ws = Path(workspace).expanduser() if workspace else Path.cwd()
@@ -670,15 +651,14 @@ def start_review_run(
     # Profile pinning and continuation
     selected_profile_name = profile
     conversation_id_to_continue = None
-    target_continue_id = continue_watch_id or continue_review_id
-    if target_continue_id:
-        prior_dir = get_review_dir(target_continue_id)
+    if continue_watch_id:
+        prior_dir = get_watch_dir(continue_watch_id)
         if not (prior_dir / "state.json").exists():
-            raise ValueError(f"Prior review '{target_continue_id}' does not exist")
-        prior_state = get_review_state(target_continue_id)
+            raise ValueError(f"Prior watch '{continue_watch_id}' does not exist")
+        prior_state = get_watch_state(continue_watch_id)
         if profile is not None and profile != prior_state.profile:
             raise ValueError(
-                f"Cannot specify profile '{profile}' when continuing review "
+                f"Cannot specify profile '{profile}' when continuing watch "
                 f"with profile '{prior_state.profile}'"
             )
         selected_profile_name = prior_state.profile
@@ -722,16 +702,13 @@ def start_review_run(
     if additional_dirs and not caps.get("supports_add_dir", False):
         raise RuntimeError("Installed Agy does not support additional directories")
 
-    # Generate review ID and prepare review directory
-    review_id = f"rev_{uuid.uuid4().hex[:16]}"
-    review_dir = get_review_dir(review_id)
-    ensure_private_directory(review_dir)
+    # Generate watch ID and prepare watch directory
+    watch_id = f"watch_{uuid.uuid4().hex[:16]}"
+    watch_dir = get_watch_dir(watch_id)
+    ensure_private_directory(watch_dir)
 
-    # Write a minimal state stub BEFORE acquiring the lease so that any
-    # concurrent runner that reads the lease file and checks this review's
-    # state.json will see status="running" and back off.
     _stub_state = {
-        "review_id": review_id,
+        "watch_id": watch_id,
         "status": "running",
         "profile": profile_name,
         "workspace": str(workspace_path),
@@ -753,27 +730,27 @@ def start_review_run(
         "exit_signal_path": None,
         "conversation_id": conversation_id_to_continue,
     }
-    atomic_write_json(review_dir / "state.json", _stub_state)
+    atomic_write_json(watch_dir / "state.json", _stub_state)
 
-    acquire_repo_lease(repo_root, review_id)
+    acquire_repo_lease(repo_root, watch_id)
 
     try:
         # Capture baseline tree snapshot
-        temp_baseline_index = review_dir / f"baseline_index_{uuid.uuid4().hex[:8]}"
+        temp_baseline_index = watch_dir / f"baseline_index_{uuid.uuid4().hex[:8]}"
         baseline_tree = take_git_snapshot(repo_root, temp_baseline_index)
 
-        pty_log = review_dir / "pty.log"
+        pty_log = watch_dir / "pty.log"
         pty_log.touch(mode=0o600)
         ensure_private_file(pty_log)
 
-        diff_file = review_dir / "diff.patch"
+        diff_file = watch_dir / "diff.patch"
         diff_file.touch(mode=0o600)
         ensure_private_file(diff_file)
 
-        exit_file = review_dir / ".exit"
+        exit_file = watch_dir / ".exit"
 
-        req = ReviewRunRequest(
-            review_id=review_id,
+        req = WatchRunRequest(
+            watch_id=watch_id,
             prompt=prompt,
             workspace=str(workspace_path),
             repo_root=str(repo_root),
@@ -785,14 +762,14 @@ def start_review_run(
             sandbox=sandbox,
             additional_dirs=additional_dirs,
             auto_approval=auto_approval,
-            continue_review_id=target_continue_id,
+            continue_watch_id=continue_watch_id,
             conversation_id=conversation_id_to_continue,
             baseline_tree=baseline_tree,
             baseline_commit=head_commit,
         )
 
-        state = ReviewRunState(
-            review_id=review_id,
+        state = WatchRunState(
+            watch_id=watch_id,
             status="running",
             profile=profile_name,
             workspace=str(workspace_path),
@@ -807,18 +784,18 @@ def start_review_run(
             conversation_id=conversation_id_to_continue,
         )
 
-        atomic_write_json(review_dir / "request.json", req.to_dict())
-        atomic_write_json(review_dir / "state.json", state.to_dict())
+        atomic_write_json(watch_dir / "request.json", req.to_dict())
+        atomic_write_json(watch_dir / "state.json", state.to_dict())
 
         # Generate owner-only bash script
-        runner_sh = review_dir / "runner.sh"
+        runner_sh = watch_dir / "runner.sh"
         script_content = (
             "#!/usr/bin/env bash\n"
             "set -u\n"
-            f'REVIEW_DIR="{review_dir}"\n'
-            'EXIT_FILE="$REVIEW_DIR/.exit"\n'
-            'EXIT_TMP="$REVIEW_DIR/.exit.tmp.$$"\n'
-            f'"{sys.executable}" -m magy.review_runner "$REVIEW_DIR"\n'
+            f'WATCH_DIR="{watch_dir}"\n'
+            'EXIT_FILE="$WATCH_DIR/.exit"\n'
+            'EXIT_TMP="$WATCH_DIR/.exit.tmp.$$"\n'
+            f'"{sys.executable}" -m magy.watch_runner "$WATCH_DIR"\n'
             "EXIT_CODE=$?\n"
             'echo "$EXIT_CODE" > "$EXIT_TMP"\n'
             'mv -f "$EXIT_TMP" "$EXIT_FILE"\n'
@@ -831,7 +808,9 @@ def start_review_run(
         if mux_cmd is not None:
             runner_cmd = ["bash", str(runner_sh)]
             if any("{cmd}" in arg for arg in mux_cmd):
-                command = [arg.replace("{cmd}", " ".join(runner_cmd)) for arg in mux_cmd]
+                command = [
+                    arg.replace("{cmd}", " ".join(runner_cmd)) for arg in mux_cmd
+                ]
             else:
                 command = [*mux_cmd, *runner_cmd]
             try:
@@ -845,14 +824,14 @@ def start_review_run(
                 "run",
                 "--floating",
                 "--name",
-                f"magy-task-{review_id}",
+                f"magy-task-{watch_id}",
                 "--cwd",
                 str(workspace_path),
                 "--",
                 "bash",
                 "-c",
                 'exec bash "$1"',
-                "magy-review",
+                "magy-watch",
                 str(runner_sh),
             ]
 
@@ -865,73 +844,75 @@ def start_review_run(
                     timeout=15,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise RuntimeError("Zellij could not create a reviewed Magy pane") from exc
+                raise RuntimeError(
+                    "Zellij could not create a watched Magy pane"
+                ) from exc
 
             if result.returncode != 0:
                 raise RuntimeError(
-                    "Zellij could not create a reviewed Magy pane; verify the "
+                    "Zellij could not create a watched Magy pane; verify the "
                     "active session and available pane space"
                 )
 
             pane_lines = result.stdout.strip().splitlines()
             if not pane_lines:
-                raise RuntimeError("Zellij created no pane for the reviewed Magy run")
+                raise RuntimeError("Zellij created no pane for the watched Magy run")
 
             pane_id = pane_lines[-1].strip()
-        update_review_state(review_id, {"pane_id": pane_id})
+        update_watch_state(watch_id, {"pane_id": pane_id})
 
-        spawn_detached_monitor(review_id)
+        spawn_detached_monitor(watch_id)
 
-        return ReviewRunStart(
-            review_id=review_id,
+        return WatchRunStart(
+            watch_id=watch_id,
             pane_id=pane_id,
             profile=profile_name,
             workspace=str(workspace_path),
         )
 
     except Exception:
-        release_repo_lease(repo_root, review_id)
+        release_repo_lease(repo_root, watch_id)
         try:
-            curr = get_review_state(review_id)
-            if curr.status not in TERMINAL_REVIEW_STATUSES:
+            curr = get_watch_state(watch_id)
+            if curr.status not in TERMINAL_WATCH_STATUSES:
                 curr.status = "failed"
-                curr.error = "Review run could not be started"
+                curr.error = "Watch run could not be started"
                 curr.finished_at = time.time()
-                atomic_write_json(review_dir / "state.json", curr.to_dict())
+                atomic_write_json(watch_dir / "state.json", curr.to_dict())
         except Exception:
             pass
         raise
 
 
-def get_review_status(review_id: str) -> ReviewRunStatus:
-    """Return status of review run, reconciling with monitor exit signal on demand."""
-    state = get_review_state(review_id)
+def get_watch_status(watch_id: str) -> WatchRunStatus:
+    """Return status of watch run, reconciling with monitor exit signal on demand."""
+    state = get_watch_state(watch_id)
     if state.status == "running":
-        review_dir = get_review_dir(review_id)
-        exit_file = review_dir / ".exit"
+        watch_dir = get_watch_dir(watch_id)
+        exit_file = watch_dir / ".exit"
         if exit_file.exists():
             try:
                 code = int(exit_file.read_text(encoding="utf-8").strip())
             except Exception:
-                state = finalize_review(
-                    review_id,
+                state = finalize_watch(
+                    watch_id,
                     exit_code=1,
                     error="Exit signal file is corrupted or unreadable",
                     status="failed",
                 )
-                code = None  # already finalized
+                code = None
             if code is not None:
-                state = finalize_review(review_id, exit_code=code)
+                state = finalize_watch(watch_id, exit_code=code)
         elif not is_pane_alive(state.pane_id):
-            state = finalize_review(
-                review_id,
+            state = finalize_watch(
+                watch_id,
                 exit_code=1,
                 error="Pane closed before execution completed",
                 status="failed",
             )
 
-    return ReviewRunStatus(
-        review_id=state.review_id,
+    return WatchRunStatus(
+        watch_id=state.watch_id,
         status=state.status,
         profile=state.profile,
         workspace=state.workspace,
@@ -944,42 +925,42 @@ def get_review_status(review_id: str) -> ReviewRunStatus:
     )
 
 
-def wait_review_run(
-    review_id: str,
+def wait_watch_run(
+    watch_id: str,
     timeout: float = 20.0,
     poll_interval: float = 0.25,
-) -> ReviewRunStatus:
-    """Short-poll review run status until completion or timeout."""
+) -> WatchRunStatus:
+    """Short-poll watch run status until completion or timeout."""
     clamped_timeout = max(0.1, min(float(timeout), 60.0))
     deadline = time.time() + clamped_timeout
 
     while time.time() < deadline:
-        st = get_review_status(review_id)
-        if st.status in TERMINAL_REVIEW_STATUSES:
+        st = get_watch_status(watch_id)
+        if st.status in TERMINAL_WATCH_STATUSES:
             return st
         time.sleep(poll_interval)
 
-    return get_review_status(review_id)
+    return get_watch_status(watch_id)
 
 
-def cancel_review_run(review_id: str) -> ReviewRunStatus:
-    """Cancel active review run, killing process tree, pane, and releasing lease."""
-    lock = get_review_lock(review_id)
+def cancel_watch_run(watch_id: str) -> WatchRunStatus:
+    """Cancel active watch run, killing process tree, pane, and releasing lease."""
+    lock = get_watch_lock(watch_id)
     with lock:
-        state = get_review_state(review_id)
-        if state.status in TERMINAL_REVIEW_STATUSES:
-            return get_review_status(review_id)
+        state = get_watch_state(watch_id)
+        if state.status in TERMINAL_WATCH_STATUSES:
+            return get_watch_status(watch_id)
         state.status = "cancelled"
         state.finished_at = time.time()
-        state.error = "Review was cancelled by user"
-        atomic_write_json(get_review_dir(review_id) / "state.json", state.to_dict())
+        state.error = "Watch was cancelled by user"
+        atomic_write_json(get_watch_dir(watch_id) / "state.json", state.to_dict())
 
     if state.repo_root:
-        release_repo_lease(Path(state.repo_root), review_id)
+        release_repo_lease(Path(state.repo_root), watch_id)
 
     if state.runner_pid:
         try:
-            _terminate_pid_tree(state.runner_pid, state.runner_create_time, review_id)
+            _terminate_pid_tree(state.runner_pid, state.runner_create_time, watch_id)
         except Exception:
             pass
 
@@ -989,7 +970,7 @@ def cancel_review_run(review_id: str) -> ReviewRunStatus:
         except Exception:
             pass
 
-    return get_review_status(review_id)
+    return get_watch_status(watch_id)
 
 
 def _read_file_chunk(
@@ -1045,12 +1026,12 @@ def _read_file_chunk(
     return content_str, next_offset, eof
 
 
-def get_review_log(
-    review_id: str,
+def get_watch_log(
+    watch_id: str,
     offset: int = 0,
     limit: int = 65536,
-) -> ReviewLogResult:
-    """Retrieve bounded chunk from review PTY log."""
+) -> WatchLogResult:
+    """Retrieve bounded chunk from watch PTY log."""
     if offset < 0:
         raise ValueError(f"Offset cannot be negative: {offset}")
     if limit < MIN_RESULT_CHUNK_BYTES:
@@ -1060,23 +1041,23 @@ def get_review_log(
     if limit > MAX_RESULT_CHUNK_BYTES:
         raise ValueError(f"Limit cannot exceed {MAX_RESULT_CHUNK_BYTES} bytes: {limit}")
 
-    state = get_review_state(review_id)
+    state = get_watch_state(watch_id)
     log_path = (
         Path(state.pty_log_path)
         if state.pty_log_path
-        else (get_review_dir(review_id) / "pty.log")
+        else (get_watch_dir(watch_id) / "pty.log")
     )
     if not log_path.exists():
-        raise FileNotFoundError("Review log is unavailable")
+        raise FileNotFoundError("Watch log is unavailable")
 
     content, next_offset, eof = _read_file_chunk(
         log_path,
         offset,
         limit,
-        is_terminal=(state.status in TERMINAL_REVIEW_STATUSES),
+        is_terminal=(state.status in TERMINAL_WATCH_STATUSES),
     )
-    return ReviewLogResult(
-        review_id=state.review_id,
+    return WatchLogResult(
+        watch_id=state.watch_id,
         status=state.status,
         content=content,
         offset=offset,
@@ -1085,12 +1066,12 @@ def get_review_log(
     )
 
 
-def get_review_result(
-    review_id: str,
+def get_watch_result(
+    watch_id: str,
     offset: int = 0,
     limit: int = 65536,
-) -> ReviewDiffResult:
-    """Retrieve bounded chunk of final Git diff after review completion."""
+) -> WatchDiffResult:
+    """Retrieve bounded chunk of final Git diff after watch completion."""
     if offset < 0:
         raise ValueError(f"Offset cannot be negative: {offset}")
     if limit < MIN_RESULT_CHUNK_BYTES:
@@ -1100,16 +1081,16 @@ def get_review_result(
     if limit > MAX_RESULT_CHUNK_BYTES:
         raise ValueError(f"Limit cannot exceed {MAX_RESULT_CHUNK_BYTES} bytes: {limit}")
 
-    state = get_review_state(review_id)
+    state = get_watch_state(watch_id)
     diff_path = (
         Path(state.diff_path)
         if state.diff_path
-        else (get_review_dir(review_id) / "diff.patch")
+        else (get_watch_dir(watch_id) / "diff.patch")
     )
     if not diff_path.exists():
-        if state.status not in TERMINAL_REVIEW_STATUSES:
-            return ReviewDiffResult(
-                review_id=state.review_id,
+        if state.status not in TERMINAL_WATCH_STATUSES:
+            return WatchDiffResult(
+                watch_id=state.watch_id,
                 status=state.status,
                 exit_code=state.exit_code,
                 diff="",
@@ -1117,8 +1098,8 @@ def get_review_result(
                 next_offset=0,
                 eof=False,
             )
-        return ReviewDiffResult(
-            review_id=state.review_id,
+        return WatchDiffResult(
+            watch_id=state.watch_id,
             status=state.status,
             exit_code=state.exit_code,
             diff="",
@@ -1131,10 +1112,10 @@ def get_review_result(
         diff_path,
         offset,
         limit,
-        is_terminal=(state.status in TERMINAL_REVIEW_STATUSES),
+        is_terminal=(state.status in TERMINAL_WATCH_STATUSES),
     )
-    return ReviewDiffResult(
-        review_id=state.review_id,
+    return WatchDiffResult(
+        watch_id=state.watch_id,
         status=state.status,
         exit_code=state.exit_code,
         diff=content,

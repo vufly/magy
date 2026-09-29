@@ -5,23 +5,23 @@ from types import SimpleNamespace
 
 import pytest
 
-import magy.reviews as reviews
-from magy.reviews import (
-    ReviewRunStart,
-    ReviewRunState,
+import magy.watches as watches
+from magy.watches import (
+    WatchRunStart,
+    WatchRunState,
     acquire_repo_lease,
-    cancel_review_run,
+    cancel_watch_run,
     compute_git_diff,
-    finalize_review,
-    get_review_dir,
-    get_review_log,
-    get_review_result,
-    get_review_status,
+    finalize_watch,
+    get_watch_dir,
+    get_watch_log,
+    get_watch_result,
+    get_watch_status,
     release_repo_lease,
-    start_review_run,
+    start_watch_run,
     take_git_snapshot,
     validate_git_repository,
-    wait_review_run,
+    wait_watch_run,
 )
 
 
@@ -53,21 +53,21 @@ def mock_environment(monkeypatch, git_repo: Path):
     """Set up mock Zellij and Agy environment."""
     monkeypatch.setenv("ZELLIJ", "0")
     monkeypatch.setenv("ZELLIJ_SESSION_NAME", "test-session")
-    monkeypatch.setattr(reviews.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(watches.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
 
     config = SimpleNamespace(agy_cmd=None, agy_resolver=None)
     monkeypatch.setattr(
-        reviews,
+        watches,
         "load_config_result",
         lambda: SimpleNamespace(error=None, config=config),
     )
     monkeypatch.setattr(
-        reviews,
+        watches,
         "resolve_agy_executable",
         lambda **kwargs: ("/usr/bin/agy", None),
     )
     monkeypatch.setattr(
-        reviews,
+        watches,
         "get_agy_capabilities",
         lambda executable: {
             "supports_auto_approval": True,
@@ -75,14 +75,14 @@ def mock_environment(monkeypatch, git_repo: Path):
         },
     )
     monkeypatch.setattr(
-        reviews,
+        watches,
         "select_profile",
         lambda explicit_name: SimpleNamespace(name=explicit_name or "default-p"),
     )
     monkeypatch.setattr(
-        reviews,
+        watches,
         "spawn_detached_monitor",
-        lambda review_id: SimpleNamespace(pid=9999),
+        lambda watch_id: SimpleNamespace(pid=9999),
     )
 
     real_run = subprocess.run
@@ -92,7 +92,7 @@ def mock_environment(monkeypatch, git_repo: Path):
             return subprocess.CompletedProcess(cmd, 0, "terminal_42\n", "")
         return real_run(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(reviews.subprocess, "run", fake_run)
+    monkeypatch.setattr(watches.subprocess, "run", fake_run)
 
 
 def test_validate_git_repository_success(git_repo: Path):
@@ -149,7 +149,7 @@ def test_git_snapshot_and_diff_excludes_preexisting_dirty_and_untracked(
     baseline_tree = take_git_snapshot(git_repo, baseline_index)
     assert len(baseline_tree) == 40
 
-    # 3. Simulate Agy run edits + user manual commit during review
+    # 3. Simulate Agy run edits + user manual commit during watch
     agy_new = git_repo / "agy_created.txt"
     agy_new.write_text("created by agy\n", encoding="utf-8")
 
@@ -158,10 +158,10 @@ def test_git_snapshot_and_diff_excludes_preexisting_dirty_and_untracked(
     )
 
     manual = git_repo / "manual.txt"
-    manual.write_text("user manual commit during review\n", encoding="utf-8")
+    manual.write_text("user manual commit during watch\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(git_repo), "add", "manual.txt"], check=True)
     subprocess.run(
-        ["git", "-C", str(git_repo), "commit", "-m", "user commit during review"],
+        ["git", "-C", str(git_repo), "commit", "-m", "user commit during watch"],
         check=True,
     )
 
@@ -178,7 +178,7 @@ def test_git_snapshot_and_diff_excludes_preexisting_dirty_and_untracked(
     assert "+created by agy" in patch
 
     assert "diff --git a/manual.txt b/manual.txt" in patch
-    assert "+user manual commit during review" in patch
+    assert "+user manual commit during watch" in patch
 
     assert "diff --git a/README.md b/README.md" in patch
     assert "+ Agy new line" in patch
@@ -200,43 +200,43 @@ def test_git_snapshot_empty_diff(git_repo: Path, tmp_path: Path):
 
 
 def test_repo_lease_concurrency(git_repo: Path, tmp_path: Path):
-    rev1 = "rev_1111111111111111"
-    rev2 = "rev_2222222222222222"
+    watch1 = "watch_1111111111111111"
+    watch2 = "watch_2222222222222222"
 
-    dir1 = get_review_dir(rev1)
+    dir1 = get_watch_dir(watch1)
     dir1.mkdir(parents=True, exist_ok=True)
-    dir2 = get_review_dir(rev2)
+    dir2 = get_watch_dir(watch2)
     dir2.mkdir(parents=True, exist_ok=True)
 
-    st1 = ReviewRunState(
-        review_id=rev1,
+    st1 = WatchRunState(
+        watch_id=watch1,
         status="running",
         repo_root=str(git_repo),
         workspace=str(git_repo),
     )
     (dir1 / "state.json").write_text(json.dumps(st1.to_dict()), encoding="utf-8")
 
-    acquire_repo_lease(git_repo, rev1)
+    acquire_repo_lease(git_repo, watch1)
 
     # Second active run on same repo rejected
     with pytest.raises(
-        ValueError, match="Another reviewed run is already active for this repository"
+        ValueError, match="Another watched run is already active for this repository"
     ):
-        acquire_repo_lease(git_repo, rev2)
+        acquire_repo_lease(git_repo, watch2)
 
     # Different repo allowed concurrently
     other_repo = tmp_path / "other_repo"
     other_repo.mkdir()
-    acquire_repo_lease(other_repo, rev2)
-    release_repo_lease(other_repo, rev2)
+    acquire_repo_lease(other_repo, watch2)
+    release_repo_lease(other_repo, watch2)
 
-    # Releasing rev1 lease allows rev2
-    release_repo_lease(git_repo, rev1)
-    acquire_repo_lease(git_repo, rev2)
-    release_repo_lease(git_repo, rev2)
+    # Releasing watch1 lease allows watch2
+    release_repo_lease(git_repo, watch1)
+    acquire_repo_lease(git_repo, watch2)
+    release_repo_lease(git_repo, watch2)
 
 
-def test_start_review_run_builds_command_and_runner_script(
+def test_start_watch_run_builds_command_and_runner_script(
     mock_environment, git_repo: Path, monkeypatch
 ):
     calls = []
@@ -248,9 +248,9 @@ def test_start_review_run_builds_command_and_runner_script(
             return subprocess.CompletedProcess(command, 0, "terminal_55\n", "")
         return real_run(command, **kwargs)
 
-    monkeypatch.setattr(reviews.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(watches.subprocess, "run", fake_subprocess_run)
 
-    start_res = start_review_run(
+    start_res = start_watch_run(
         "Refactor parser",
         workspace=str(git_repo),
         profile="dev-profile",
@@ -263,7 +263,7 @@ def test_start_review_run_builds_command_and_runner_script(
         auto_approval=True,
     )
 
-    assert isinstance(start_res, ReviewRunStart)
+    assert isinstance(start_res, WatchRunStart)
     assert start_res.pane_id == "terminal_55"
     assert start_res.profile == "dev-profile"
     assert start_res.workspace == str(git_repo.resolve())
@@ -275,7 +275,7 @@ def test_start_review_run_builds_command_and_runner_script(
         "run",
         "--floating",
         "--name",
-        f"magy-task-{start_res.review_id}",
+        f"magy-task-{start_res.watch_id}",
         "--cwd",
         str(git_repo.resolve()),
     ]
@@ -283,190 +283,190 @@ def test_start_review_run_builds_command_and_runner_script(
         "bash",
         "-c",
         'exec bash "$1"',
-        "magy-review",
+        "magy-watch",
     ]
 
     # Verify runner script was written with mode 0o700 and no interpolated prompt
-    review_dir = get_review_dir(start_res.review_id)
-    runner_sh = review_dir / "runner.sh"
+    watch_dir = get_watch_dir(start_res.watch_id)
+    runner_sh = watch_dir / "runner.sh"
     assert runner_sh.exists()
     assert (runner_sh.stat().st_mode & 0o777) == 0o700
     script_text = runner_sh.read_text(encoding="utf-8")
     assert "Refactor parser" not in script_text
-    assert "magy.review_runner" in script_text
+    assert "magy.watch_runner" in script_text
     assert ".exit" in script_text
 
-    req = reviews.get_review_request(start_res.review_id)
+    req = watches.get_watch_request(start_res.watch_id)
     assert req.prompt == "Refactor parser"
     assert req.model == "gemini-3.8-flash"
     assert req.agent == "code-reviewer"
     assert req.auto_approval is True
 
-    st = reviews.get_review_state(start_res.review_id)
+    st = watches.get_watch_state(start_res.watch_id)
     assert st.status == "running"
     assert st.pane_id == "terminal_55"
     assert len(st.baseline_tree) == 40
 
 
-def test_start_review_run_continue_review_id_profile_pinning(
+def test_start_watch_run_continue_watch_id_profile_pinning(
     mock_environment, git_repo: Path, monkeypatch
 ):
     # 1. Start initial run with pinned profile
-    start1 = start_review_run(
+    start1 = start_watch_run(
         "Step 1",
         workspace=str(git_repo),
         profile="profile-A",
     )
-    finalize_review(start1.review_id, exit_code=0)
+    finalize_watch(start1.watch_id, exit_code=0)
 
-    # 2. Continue with continue_review_id
+    # 2. Continue with continue_watch_id
     selected_profiles = []
 
     def track_select(explicit_name=None):
         selected_profiles.append(explicit_name)
         return SimpleNamespace(name=explicit_name or "selected")
 
-    monkeypatch.setattr(reviews, "select_profile", track_select)
+    monkeypatch.setattr(watches, "select_profile", track_select)
 
-    start2 = start_review_run(
+    start2 = start_watch_run(
         "Step 2 continue",
         workspace=str(git_repo),
-        continue_review_id=start1.review_id,
+        continue_watch_id=start1.watch_id,
     )
 
     assert start2.profile == "profile-A"
     assert selected_profiles == ["profile-A"]
 
-    req2 = reviews.get_review_request(start2.review_id)
-    assert req2.continue_review_id == start1.review_id
+    req2 = watches.get_watch_request(start2.watch_id)
+    assert req2.continue_watch_id == start1.watch_id
 
     # 3. Conflicting profile is rejected
     with pytest.raises(ValueError, match="Cannot specify profile"):
-        start_review_run(
+        start_watch_run(
             "Step 3 conflicting",
             workspace=str(git_repo),
             profile="profile-B",
-            continue_review_id=start1.review_id,
+            continue_watch_id=start1.watch_id,
         )
 
 
-def test_review_status_and_monitor_reconciles_exit_signal(
+def test_watch_status_and_monitor_reconciles_exit_signal(
     mock_environment, git_repo: Path
 ):
-    start_res = start_review_run("Test exit reconcile", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+    start_res = start_watch_run("Test exit reconcile", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
-    st1 = get_review_status(start_res.review_id)
+    st1 = get_watch_status(start_res.watch_id)
     assert st1.status == "running"
 
     (git_repo / "new_out.txt").write_text("finished work\n", encoding="utf-8")
-    (review_dir / ".exit").write_text("0\n", encoding="utf-8")
+    (watch_dir / ".exit").write_text("0\n", encoding="utf-8")
 
-    st2 = get_review_status(start_res.review_id)
+    st2 = get_watch_status(start_res.watch_id)
     assert st2.status == "completed"
     assert st2.exit_code == 0
 
-    res_diff = get_review_result(start_res.review_id)
+    res_diff = get_watch_result(start_res.watch_id)
     assert "new_out.txt" in res_diff.diff
     assert res_diff.eof is True
 
 
-def test_early_pane_closure_fails_review(mock_environment, git_repo: Path, monkeypatch):
-    start_res = start_review_run("Test early close", workspace=str(git_repo))
+def test_early_pane_closure_fails_watch(mock_environment, git_repo: Path, monkeypatch):
+    start_res = start_watch_run("Test early close", workspace=str(git_repo))
 
-    monkeypatch.setattr(reviews, "is_pane_alive", lambda pane_id: False)
+    monkeypatch.setattr(watches, "is_pane_alive", lambda pane_id: False)
 
-    st = get_review_status(start_res.review_id)
+    st = get_watch_status(start_res.watch_id)
     assert st.status == "failed"
     assert "Pane closed" in (st.error or "")
 
 
-def test_cancel_review_run(mock_environment, git_repo: Path, monkeypatch):
+def test_cancel_watch_run(mock_environment, git_repo: Path, monkeypatch):
     closed_panes = []
     monkeypatch.setattr(
-        reviews, "close_zellij_pane", lambda pane_id: closed_panes.append(pane_id)
+        watches, "close_zellij_pane", lambda pane_id: closed_panes.append(pane_id)
     )
 
-    start_res = start_review_run("Test cancel", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+    start_res = start_watch_run("Test cancel", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
-    pty_log = review_dir / "pty.log"
+    pty_log = watch_dir / "pty.log"
     pty_log.write_text("Partial execution output...", encoding="utf-8")
 
-    status = cancel_review_run(start_res.review_id)
+    status = cancel_watch_run(start_res.watch_id)
     assert status.status == "cancelled"
     assert closed_panes == ["terminal_42"]
 
     assert pty_log.read_text(encoding="utf-8") == "Partial execution output..."
 
-    lease_file = reviews._repo_lease_path(git_repo)
+    lease_file = watches._repo_lease_path(git_repo)
     assert not lease_file.exists()
 
 
-def test_review_log_and_result_chunking(mock_environment, git_repo: Path):
-    start_res = start_review_run("Chunk test", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+def test_watch_log_and_result_chunking(mock_environment, git_repo: Path):
+    start_res = start_watch_run("Chunk test", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
-    pty_log = review_dir / "pty.log"
+    pty_log = watch_dir / "pty.log"
     pty_log.write_text("Line 1\nLine 2\nLine 3\n", encoding="utf-8")
 
-    chunk1 = get_review_log(start_res.review_id, offset=0, limit=7)
+    chunk1 = get_watch_log(start_res.watch_id, offset=0, limit=7)
     assert chunk1.content == "Line 1\n"
     assert chunk1.next_offset == 7
     assert chunk1.eof is False
 
-    chunk2 = get_review_log(start_res.review_id, offset=7, limit=50)
+    chunk2 = get_watch_log(start_res.watch_id, offset=7, limit=50)
     assert chunk2.content == "Line 2\nLine 3\n"
     assert chunk2.next_offset == 21
     assert chunk2.eof is False
 
     with pytest.raises(ValueError, match="Offset cannot be negative"):
-        get_review_log(start_res.review_id, offset=-1)
+        get_watch_log(start_res.watch_id, offset=-1)
     with pytest.raises(ValueError, match="Limit must be at least"):
-        get_review_log(start_res.review_id, limit=2)
+        get_watch_log(start_res.watch_id, limit=2)
     with pytest.raises(ValueError, match="Limit cannot exceed"):
-        get_review_log(start_res.review_id, limit=2000000)
+        get_watch_log(start_res.watch_id, limit=2000000)
 
 
-def test_wait_review_run(mock_environment, git_repo: Path):
-    start_res = start_review_run("Wait test", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+def test_wait_watch_run(mock_environment, git_repo: Path):
+    start_res = start_watch_run("Wait test", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
-    (review_dir / ".exit").write_text("0\n", encoding="utf-8")
+    (watch_dir / ".exit").write_text("0\n", encoding="utf-8")
 
-    st = wait_review_run(start_res.review_id, timeout=1.0)
+    st = wait_watch_run(start_res.watch_id, timeout=1.0)
     assert st.status == "completed"
 
 
 # ── Bug fix tests ──────────────────────────────────────────────────────────────
 
 
-def test_corrupt_exit_signal_fails_review_in_status(mock_environment, git_repo: Path):
-    """Issue #5: corrupt .exit must fail the review, not default to exit_code=0."""
-    start_res = start_review_run("Corrupt exit test", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+def test_corrupt_exit_signal_fails_watch_in_status(mock_environment, git_repo: Path):
+    """Issue #5: corrupt .exit must fail the watch, not default to exit_code=0."""
+    start_res = start_watch_run("Corrupt exit test", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
     # Write a non-integer (corrupted) exit signal
-    (review_dir / ".exit").write_text("NOT_A_NUMBER\n", encoding="utf-8")
+    (watch_dir / ".exit").write_text("NOT_A_NUMBER\n", encoding="utf-8")
 
-    st = get_review_status(start_res.review_id)
+    st = get_watch_status(start_res.watch_id)
     assert st.status == "failed"
     assert "corrupted" in (st.error or "").lower()
 
 
-def test_corrupt_exit_signal_fails_review_in_monitor(mock_environment, git_repo: Path):
-    """Issue #5: monitor must fail review on corrupt .exit, not succeed."""
-    import magy.reviews as rv
+def test_corrupt_exit_signal_fails_watch_in_monitor(mock_environment, git_repo: Path):
+    """Issue #5: monitor must fail watch on corrupt .exit, not succeed."""
+    import magy.watches as rv
 
-    start_res = start_review_run("Monitor corrupt exit", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+    start_res = start_watch_run("Monitor corrupt exit", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
-    (review_dir / ".exit").write_text("bad!", encoding="utf-8")
+    (watch_dir / ".exit").write_text("bad!", encoding="utf-8")
 
-    result = rv.run_review_monitor(start_res.review_id, poll_interval=0.0, timeout=1.0)
+    result = rv.run_watch_monitor(start_res.watch_id, poll_interval=0.0, timeout=1.0)
     assert result == 1
 
-    st = get_review_status(start_res.review_id)
+    st = get_watch_status(start_res.watch_id)
     assert st.status == "failed"
     assert "corrupted" in (st.error or "").lower()
 
@@ -475,9 +475,9 @@ def test_snapshot_failure_preserved_when_agy_exits_zero(
     mock_environment, git_repo: Path, monkeypatch
 ):
     """Issue #3: failed git snapshot must set failed, never completed."""
-    import magy.reviews as rv
+    import magy.watches as rv
 
-    start_res = start_review_run("Snapshot fail test", workspace=str(git_repo))
+    start_res = start_watch_run("Snapshot fail test", workspace=str(git_repo))
 
     # Simulate git snapshot raising during finalize
     def _raise_on_snapshot(*a, **kw):
@@ -485,7 +485,7 @@ def test_snapshot_failure_preserved_when_agy_exits_zero(
 
     monkeypatch.setattr(rv, "take_git_snapshot", _raise_on_snapshot)
 
-    state = finalize_review(start_res.review_id, exit_code=0)
+    state = finalize_watch(start_res.watch_id, exit_code=0)
     assert state.status == "failed"
     assert state.error is not None
     assert "git" in state.error.lower() or "snapshot" in state.error.lower()
@@ -494,17 +494,17 @@ def test_snapshot_failure_preserved_when_agy_exits_zero(
 def test_lease_stub_state_prevents_race(git_repo: Path, tmp_path: Path, monkeypatch):
     """Issue #4: state.json stub written before lease so concurrent runner
     sees status=running and backs off."""
-    import magy.reviews as rv
+    import magy.watches as rv
 
-    review_id = "rev_aabbccddaabbccdd"
-    review_dir = rv.get_review_dir(review_id)
-    review_dir.mkdir(parents=True, exist_ok=True)
+    watch_id = "watch_aabbccddaabbccdd"
+    watch_dir = rv.get_watch_dir(watch_id)
+    watch_dir.mkdir(parents=True, exist_ok=True)
 
-    # Simulate what start_review_run does: write stub then acquire lease
+    # Simulate what start_watch_run does: write stub then acquire lease
     from magy.storage import atomic_write_json
 
     stub = {
-        "review_id": review_id,
+        "watch_id": watch_id,
         "status": "running",
         "profile": "test",
         "workspace": str(git_repo),
@@ -525,28 +525,28 @@ def test_lease_stub_state_prevents_race(git_repo: Path, tmp_path: Path, monkeypa
         "diff_path": None,
         "exit_signal_path": None,
     }
-    atomic_write_json(review_dir / "state.json", stub)
-    acquire_repo_lease(git_repo, review_id)
+    atomic_write_json(watch_dir / "state.json", stub)
+    acquire_repo_lease(git_repo, watch_id)
 
     # Now a second runner sees the running stub and cannot steal lease
-    other_id = "rev_1234567890abcdef"
-    with pytest.raises(ValueError, match="Another reviewed run is already active"):
+    other_id = "watch_1234567890abcdef"
+    with pytest.raises(ValueError, match="Another watched run is already active"):
         acquire_repo_lease(git_repo, other_id)
 
-    release_repo_lease(git_repo, review_id)
+    release_repo_lease(git_repo, watch_id)
 
 
 def test_runner_sets_env_vars_and_parses_stream_json(
     mock_environment, git_repo: Path, monkeypatch
 ):
-    """Issue #2 + stream-json: runner sets MAGY_RUN_ID/REVIEW_ID and parses events."""
+    """Issue #2 + stream-json: runner sets MAGY_RUN_ID/WATCH_ID and parses events."""
     import io
     import os
 
-    from magy.review_runner import _render_event, run_review_runner
+    from magy.watch_runner import _render_event, run_watch_runner
 
-    start_res = start_review_run("Stream-json env test", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+    start_res = start_watch_run("Stream-json env test", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
     captured_env = {}
 
@@ -599,33 +599,33 @@ def test_runner_sets_env_vars_and_parses_stream_json(
             return FakeProc()
         return real_popen(cmd, **kwargs)
 
-    monkeypatch.setattr("magy.review_runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("magy.watch_runner.subprocess.Popen", fake_popen)
 
-    exit_code = run_review_runner(str(review_dir))
+    exit_code = run_watch_runner(str(watch_dir))
 
     # Exit code from result.status=SUCCESS → 0
     assert exit_code == 0
 
     # Env vars correctly set for _terminate_pid_tree verification
-    assert captured_env.get("MAGY_REVIEW_ID") == start_res.review_id
-    assert captured_env.get("MAGY_RUN_ID") == start_res.review_id
+    assert captured_env.get("MAGY_WATCH_ID") == start_res.watch_id
+    assert captured_env.get("MAGY_RUN_ID") == start_res.watch_id
 
     # conversation_id correctly captured into state.json
-    st = reviews.get_review_state(start_res.review_id)
+    st = watches.get_watch_state(start_res.watch_id)
     assert st.conversation_id == "abc123"
 
     # Continuation uses --conversation <id> instead of race-prone --continue
-    finalize_review(start_res.review_id, exit_code=0)
-    cont_res = start_review_run(
+    finalize_watch(start_res.watch_id, exit_code=0)
+    cont_res = start_watch_run(
         "Followup step",
         workspace=str(git_repo),
-        continue_review_id=start_res.review_id,
+        continue_watch_id=start_res.watch_id,
     )
-    cont_dir = get_review_dir(cont_res.review_id)
-    cont_req = reviews.get_review_request(cont_res.review_id)
+    cont_dir = get_watch_dir(cont_res.watch_id)
+    cont_req = watches.get_watch_request(cont_res.watch_id)
     assert cont_req.conversation_id == "abc123"
 
-    run_review_runner(str(cont_dir))
+    run_watch_runner(str(cont_dir))
     last_cmd = captured_cmds[-1]
     assert "--conversation" in last_cmd
     conv_idx = last_cmd.index("--conversation")
@@ -633,7 +633,7 @@ def test_runner_sets_env_vars_and_parses_stream_json(
     assert "--continue" not in last_cmd
 
     # pty.log written with raw NDJSON (machine-readable)
-    log_content = (review_dir / "pty.log").read_text(encoding="utf-8")
+    log_content = (watch_dir / "pty.log").read_text(encoding="utf-8")
     assert '"event":"init"' in log_content
     assert '"event":"result"' in log_content
 
@@ -697,10 +697,10 @@ def test_runner_failure_status_returns_nonzero(
     """result.status != SUCCESS → runner exits 1."""
     import io
 
-    from magy.review_runner import run_review_runner
+    from magy.watch_runner import run_watch_runner
 
-    start_res = start_review_run("Failure status test", workspace=str(git_repo))
-    review_dir = get_review_dir(start_res.review_id)
+    start_res = start_watch_run("Failure status test", workspace=str(git_repo))
+    watch_dir = get_watch_dir(start_res.watch_id)
 
     fake_ndjson = "\n".join(
         [
@@ -717,8 +717,8 @@ def test_runner_failure_status_returns_nonzero(
             return 1
 
     monkeypatch.setattr(
-        "magy.review_runner.subprocess.Popen", lambda *a, **kw: FakeProc()
+        "magy.watch_runner.subprocess.Popen", lambda *a, **kw: FakeProc()
     )
 
-    exit_code = run_review_runner(str(review_dir))
+    exit_code = run_watch_runner(str(watch_dir))
     assert exit_code == 1

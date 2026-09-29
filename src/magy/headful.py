@@ -35,8 +35,10 @@ def start_headful_run(
 ) -> HeadfulRun:
     """Launch an interactive Magy run in a new pane in the current Zellij session."""
     if mux_cmd is not None:
-        if not isinstance(mux_cmd, list) or not mux_cmd or any(
-            not isinstance(d, str) or not d.strip() for d in mux_cmd
+        if (
+            not isinstance(mux_cmd, list)
+            or not mux_cmd
+            or any(not isinstance(d, str) or not d.strip() for d in mux_cmd)
         ):
             raise ValueError("mux_cmd must be a non-empty list of strings")
         zellij = None
@@ -49,12 +51,13 @@ def start_headful_run(
 
         if not os.environ.get("ZELLIJ") or not os.environ.get("ZELLIJ_SESSION_NAME"):
             raise RuntimeError(
-                "Headful mode requires Magy MCP to run inside an active Zellij session; "
-                "start OpenCode from Zellij and reconnect its MCP server"
+                "Headful mode requires Magy MCP to run inside an active Zellij "
+                "session; start OpenCode from Zellij and reconnect its MCP server"
             )
     else:
         raise ValueError(
-            f"Multiplexer '{mux}' is not supported yet; specify mux='zellij' or provide 'mux_cmd'"
+            f"Multiplexer '{mux}' is not supported yet; "
+            "specify mux='zellij' or provide 'mux_cmd'"
         )
 
     workspace_path = Path(workspace).expanduser() if workspace else Path.cwd()
@@ -119,7 +122,9 @@ def start_headful_run(
             proc = subprocess.Popen(command, cwd=str(workspace_path))
             pane_id = f"terminal_{proc.pid}"
         except Exception as exc:
-            raise RuntimeError(f"Multiplexer could not create headful pane: {exc}") from exc
+            raise RuntimeError(
+                f"Multiplexer could not create headful pane: {exc}"
+            ) from exc
         return HeadfulRun(
             profile=selected.name,
             session=mux,

@@ -4,9 +4,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from magy.reviews import get_review_lock
 from magy.runs import _process_create_time
 from magy.storage import atomic_write_json, read_json
+from magy.watches import get_watch_lock
 
 
 def _render_event(event: dict) -> str | None:
@@ -80,8 +80,8 @@ def _render_event(event: dict) -> str | None:
 def _process_stream(
     proc: subprocess.Popen,
     log_path: Path,
-    review_dir: Path | None = None,
-    review_id: str | None = None,
+    watch_dir: Path | None = None,
+    watch_id: str | None = None,
 ) -> int:
     """Read stream-json lines from stdout, render to terminal, write raw to log.
 
@@ -116,12 +116,12 @@ def _process_stream(
                 or event.get("init", {}).get("conversation_id")
                 or event.get("result", {}).get("conversation_id")
             )
-            if conv_id and not recorded_conv_id and review_dir and review_id:
+            if conv_id and not recorded_conv_id and watch_dir and watch_id:
                 recorded_conv_id = True
                 try:
-                    lock = get_review_lock(review_id)
+                    lock = get_watch_lock(watch_id)
                     with lock:
-                        state_file = review_dir / "state.json"
+                        state_file = watch_dir / "state.json"
                         state_data = read_json(state_file)
                         if state_data:
                             state_data["conversation_id"] = conv_id
@@ -146,7 +146,7 @@ def _process_stream(
     return proc.returncode
 
 
-def run_review_runner(review_dir_path: str) -> int:
+def run_watch_runner(watch_dir_path: str) -> int:
     """Execute Agy with stream-json output, rendering human-readable events in pane.
 
     Uses --output-format stream-json so events are emitted line-by-line as they
@@ -156,17 +156,17 @@ def run_review_runner(review_dir_path: str) -> int:
     stderr is inherited so agy's own diagnostics/progress appear directly in
     the pane without being captured into the log.
     """
-    review_dir = Path(review_dir_path)
-    req_file = review_dir / "request.json"
+    watch_dir = Path(watch_dir_path)
+    req_file = watch_dir / "request.json"
     req = read_json(req_file)
     if req is None:
-        print(f"Error: request.json not found in {review_dir}", file=sys.stderr)
+        print(f"Error: request.json not found in {watch_dir}", file=sys.stderr)
         return 1
 
     # Record runner PID in state.json under lock
-    lock = get_review_lock(req["review_id"])
+    lock = get_watch_lock(req["watch_id"])
     with lock:
-        state_file = review_dir / "state.json"
+        state_file = watch_dir / "state.json"
         state_data = read_json(state_file)
         if state_data:
             state_data["runner_pid"] = os.getpid()
@@ -189,7 +189,7 @@ def run_review_runner(review_dir_path: str) -> int:
     # Target specific conversation ID to eliminate race conditions
     if req.get("conversation_id"):
         cmd.extend(["--conversation", req["conversation_id"]])
-    elif req.get("continue_review_id"):
+    elif req.get("continue_watch_id"):
         cmd.append("--continue")
     if req.get("auto_approval"):
         cmd.append("--dangerously-skip-permissions")
@@ -206,7 +206,7 @@ def run_review_runner(review_dir_path: str) -> int:
     for d in req.get("additional_dirs") or []:
         cmd.extend(["--add-dir", d])
 
-    log_path = review_dir / "pty.log"
+    log_path = watch_dir / "pty.log"
     if not log_path.exists():
         log_path.touch(mode=0o600)
 
@@ -214,10 +214,10 @@ def run_review_runner(review_dir_path: str) -> int:
     if ws and Path(ws).is_dir():
         os.chdir(ws)
 
-    os.environ["MAGY_REVIEW_ID"] = req["review_id"]
+    os.environ["MAGY_WATCH_ID"] = req["watch_id"]
     # Also set MAGY_RUN_ID so _terminate_pid_tree can verify this process
-    # during cancel_review_run (it checks MAGY_RUN_ID in process environment).
-    os.environ["MAGY_RUN_ID"] = req["review_id"]
+    # during cancel_watch_run (it checks MAGY_RUN_ID in process environment).
+    os.environ["MAGY_RUN_ID"] = req["watch_id"]
 
     proc = subprocess.Popen(
         cmd,
@@ -232,18 +232,18 @@ def run_review_runner(review_dir_path: str) -> int:
     return _process_stream(
         proc,
         log_path,
-        review_dir=review_dir,
-        review_id=req["review_id"],
+        watch_dir=watch_dir,
+        watch_id=req["watch_id"],
     )
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint for review runner process."""
+    """CLI entrypoint for watch runner process."""
     args = argv if argv is not None else sys.argv[1:]
     if not args:
-        print("Usage: python -m magy.review_runner <review_dir>", file=sys.stderr)
+        print("Usage: python -m magy.watch_runner <watch_dir>", file=sys.stderr)
         return 1
-    return run_review_runner(args[0])
+    return run_watch_runner(args[0])
 
 
 if __name__ == "__main__":
