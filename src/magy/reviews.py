@@ -99,6 +99,11 @@ class ReviewRunStart:
     pane_id: str
     profile: str
     workspace: str
+    watch_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.watch_id:
+            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -116,6 +121,11 @@ class ReviewRunStatus:
     created_at: float = 0.0
     started_at: float | None = None
     finished_at: float | None = None
+    watch_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.watch_id:
+            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -129,6 +139,11 @@ class ReviewLogResult:
     offset: int = 0
     next_offset: int = 0
     eof: bool = False
+    watch_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.watch_id:
+            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -143,6 +158,11 @@ class ReviewDiffResult:
     offset: int = 0
     next_offset: int = 0
     eof: bool = False
+    watch_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.watch_id:
+            self.watch_id = self.review_id
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -612,6 +632,9 @@ def start_review_run(
     additional_dirs: list[str] | None = None,
     auto_approval: bool = False,
     continue_review_id: str | None = None,
+    continue_watch_id: str | None = None,
+    mux: str = "auto",
+    mux_cmd: list[str] | None = None,
 ) -> ReviewRunStart:
     """Start reviewed Agy run in floating Zellij pane with git snapshot baseline."""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -621,7 +644,18 @@ def start_review_run(
     ):
         raise ValueError("Additional directories must be non-empty strings")
 
-    zellij_bin = validate_zellij_environment()
+    if mux_cmd is not None:
+        if not isinstance(mux_cmd, list) or not mux_cmd or any(
+            not isinstance(d, str) or not d.strip() for d in mux_cmd
+        ):
+            raise ValueError("mux_cmd must be a non-empty list of strings")
+        zellij_bin = None
+    elif mux in ("auto", "zellij"):
+        zellij_bin = validate_zellij_environment()
+    else:
+        raise ValueError(
+            f"Multiplexer '{mux}' is not supported yet; specify mux='zellij' or provide 'mux_cmd'"
+        )
 
     ws = Path(workspace).expanduser() if workspace else Path.cwd()
     try:
@@ -636,11 +670,12 @@ def start_review_run(
     # Profile pinning and continuation
     selected_profile_name = profile
     conversation_id_to_continue = None
-    if continue_review_id:
-        prior_dir = get_review_dir(continue_review_id)
+    target_continue_id = continue_watch_id or continue_review_id
+    if target_continue_id:
+        prior_dir = get_review_dir(target_continue_id)
         if not (prior_dir / "state.json").exists():
-            raise ValueError(f"Prior review '{continue_review_id}' does not exist")
-        prior_state = get_review_state(continue_review_id)
+            raise ValueError(f"Prior review '{target_continue_id}' does not exist")
+        prior_state = get_review_state(target_continue_id)
         if profile is not None and profile != prior_state.profile:
             raise ValueError(
                 f"Cannot specify profile '{profile}' when continuing review "
@@ -750,7 +785,7 @@ def start_review_run(
             sandbox=sandbox,
             additional_dirs=additional_dirs,
             auto_approval=auto_approval,
-            continue_review_id=continue_review_id,
+            continue_review_id=target_continue_id,
             conversation_id=conversation_id_to_continue,
             baseline_tree=baseline_tree,
             baseline_commit=head_commit,
@@ -792,45 +827,57 @@ def start_review_run(
         runner_sh.write_text(script_content, encoding="utf-8")
         runner_sh.chmod(0o700)
 
-        # Launch floating pane in Zellij
-        command = [
-            zellij_bin,
-            "run",
-            "--floating",
-            "--name",
-            f"magy-task-{review_id}",
-            "--cwd",
-            str(workspace_path),
-            "--",
-            "bash",
-            "-c",
-            'exec bash "$1"',
-            "magy-review",
-            str(runner_sh),
-        ]
+        # Launch pane
+        if mux_cmd is not None:
+            runner_cmd = ["bash", str(runner_sh)]
+            if any("{cmd}" in arg for arg in mux_cmd):
+                command = [arg.replace("{cmd}", " ".join(runner_cmd)) for arg in mux_cmd]
+            else:
+                command = [*mux_cmd, *runner_cmd]
+            try:
+                proc = subprocess.Popen(command, cwd=str(workspace_path))
+                pane_id = f"terminal_{proc.pid}"
+            except Exception as exc:
+                raise RuntimeError(f"Multiplexer could not create pane: {exc}") from exc
+        else:
+            command = [
+                zellij_bin,
+                "run",
+                "--floating",
+                "--name",
+                f"magy-task-{review_id}",
+                "--cwd",
+                str(workspace_path),
+                "--",
+                "bash",
+                "-c",
+                'exec bash "$1"',
+                "magy-review",
+                str(runner_sh),
+            ]
 
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                check=False,
-                text=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError("Zellij could not create a reviewed Magy pane") from exc
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=15,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("Zellij could not create a reviewed Magy pane") from exc
 
-        if result.returncode != 0:
-            raise RuntimeError(
-                "Zellij could not create a reviewed Magy pane; verify the "
-                "active session and available pane space"
-            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Zellij could not create a reviewed Magy pane; verify the "
+                    "active session and available pane space"
+                )
 
-        pane_lines = result.stdout.strip().splitlines()
-        if not pane_lines:
-            raise RuntimeError("Zellij created no pane for the reviewed Magy run")
+            pane_lines = result.stdout.strip().splitlines()
+            if not pane_lines:
+                raise RuntimeError("Zellij created no pane for the reviewed Magy run")
 
-        pane_id = pane_lines[-1].strip()
+            pane_id = pane_lines[-1].strip()
         update_review_state(review_id, {"pane_id": pane_id})
 
         spawn_detached_monitor(review_id)

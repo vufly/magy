@@ -179,35 +179,37 @@ Magy includes a durable, stdio-based MCP server (`magy-mcp`) allowing agents in 
 
 ### Available MCP Tools
 
+Tools are registered with un-prefixed names so clients that prefix by server name (e.g., OpenCode namespaces `magy_run_start`, Claude Code uses `mcp__magy__run_start`) avoid stuttered names like `magy_magy_*`. Legacy `magy_*` names are supported via backward-compatible aliases.
+
 | Tool | Description |
 | :--- | :--- |
-| `magy_run_start` | Queue and start a prompt execution. Supports optional profile name and timeout. |
-| `magy_run_headful` | Start an interactive Agy session in a split pane in the active Zellij session; returns pane metadata. |
-| `magy_run_status` | Retrieve execution state, running time, exit status, and error classification. |
-| `magy_run_wait` | Wait for a run to finish with timeout and configurable polling interval. |
-| `magy_run_result` | Retrieve full stdout, stderr, or structured output once completed. |
-| `magy_run_cancel` | Terminate an in-flight run and clean up all child processes. |
-| `magy_profiles` | List configured profiles and their current health status. |
-| `magy_run_review_start` | Start reviewed Agy execution in a floating Zellij pane with Git baseline snapshots and conversation continuation. |
-| `magy_run_review_status` | Query status (`running`, `completed`, `failed`, `cancelled`) of a reviewed run. |
-| `magy_run_review_wait` | Short-poll until a reviewed run reaches a terminal state. |
-| `magy_run_review_log` | Stream bounded execution log chunks (NDJSON events) mid-run. |
-| `magy_run_review_cancel` | Cancel a reviewed run, terminating its processes, closing the pane, and releasing repository lease. |
-| `magy_run_review_result` | Retrieve bounded chunks of the final net Git diff between baseline and final workspace trees. |
+| `run_start` | Queue and start a prompt execution. Supports optional profile name and timeout. |
+| `pane_start` | Start an interactive Agy session in a split pane in Zellij or custom multiplexer; returns pane metadata. |
+| `run_status` | Retrieve execution state, running time, exit status, and error classification. |
+| `run_wait` | Wait for a run to finish with timeout and configurable polling interval. |
+| `run_result` | Retrieve full stdout, stderr, or structured output once completed. |
+| `run_cancel` | Terminate an in-flight run and clean up all child processes. |
+| `profiles` | List configured profiles and their current health status. |
+| `watch_start` | Start watched Agy execution in a floating pane with Git baseline snapshots and conversation continuation. Supports `mux` / `mux_cmd`. |
+| `watch_status` | Query status (`running`, `completed`, `failed`, `cancelled`) of a watched run. |
+| `watch_wait` | Short-poll until a watched run reaches a terminal state. |
+| `watch_log` | Stream bounded execution log chunks (NDJSON events) mid-run. |
+| `watch_cancel` | Cancel a watched run, terminating its processes, closing the pane, and releasing repository lease. |
+| `watch_diff` | Retrieve bounded chunks of the final net Git diff between baseline and final workspace trees. |
 
 For detailed documentation, see [`docs/guides/mcp-configuration.md`](docs/guides/mcp-configuration.md).
 
-`magy_run_headful` requires the Magy MCP server to inherit an active Zellij
-session. Its output stays in the new pane. It defaults to
-`auto_approval=true`; set `auto_approval=false` to approve tool requests in the
+`pane_start` requires the Magy MCP server to run inside an active Zellij
+session (or use `mux_cmd` for custom terminal multiplexers). Its output stays
+in the new pane. It defaults to `auto_approval=true`; set `auto_approval=false` to approve tool requests in the
 pane.
 
-The `magy_run_review_*` workflow runs Agy non-interactively in a user-facing
-floating Zellij pane while providing durable Git diff capture, profile-pinned
-conversation continuation (`continue_review_id`), baseline dirty-file
+The `watch_*` workflow runs Agy non-interactively in a user-facing
+floating pane while providing durable Git diff capture, profile-pinned
+conversation continuation (`continue_watch_id`), baseline dirty-file
 exclusion, and bounded real-time stream monitoring. The runner renders live
 human-readable progress in the pane and closes its execution pane upon
-completion. An orchestrating client can open a separate pane to inspect results. Note that
+completion. An orchestrating client can inspect results or diffs. Note that
 `auto_approval=true` is required for tool actions so Agy uses
 `--dangerously-skip-permissions`.
 

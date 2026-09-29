@@ -169,7 +169,7 @@ In OpenCode or Codex configuration on Windows (`%APPDATA%\opencode\config.json` 
 }
 ```
 
-Verify that tools (`magy_profiles`, `magy_run_start`, `magy_run_wait`, `magy_run_status`, `magy_run_result`, `magy_run_cancel`) appear in the client.
+Verify that tools appear in the client (`profiles`, `run_start`, `run_wait`, `run_status`, `run_result`, `run_cancel`, or prefixed by client as `magy_profiles`, `magy_run_start`, etc.).
 
 ---
 

@@ -36,6 +36,23 @@ from magy.runs import (
 )
 
 
+LEGACY_TOOL_ALIASES: dict[str, str] = {
+    "magy_run_start": "run_start",
+    "magy_run_headful": "pane_start",
+    "magy_run_wait": "run_wait",
+    "magy_run_status": "run_status",
+    "magy_run_result": "run_result",
+    "magy_run_cancel": "run_cancel",
+    "magy_profiles": "profiles",
+    "magy_run_review_start": "watch_start",
+    "magy_run_review_status": "watch_status",
+    "magy_run_review_wait": "watch_wait",
+    "magy_run_review_log": "watch_log",
+    "magy_run_review_cancel": "watch_cancel",
+    "magy_run_review_result": "watch_diff",
+}
+
+
 class StrictMCPServer(MCPServer):
     async def list_tools(self):
         tools = await super().list_tools()
@@ -47,11 +64,12 @@ class StrictMCPServer(MCPServer):
         return tools
 
     async def call_tool(self, name, arguments, context=None):
+        canonical_name = LEGACY_TOOL_ALIASES.get(name, name)
         tool = next(
             (
                 candidate
                 for candidate in await self.list_tools()
-                if candidate.name == name
+                if candidate.name == canonical_name
             ),
             None,
         )
@@ -79,8 +97,17 @@ class StrictMCPServer(MCPServer):
                 not isinstance(directory, str) for directory in directories
             ):
                 raise ToolError("additional_dirs must be an array of strings")
+        if "mux" in arguments and arguments["mux"] is not None:
+            if not isinstance(arguments["mux"], str):
+                raise ToolError("mux must be a string")
+        if "mux_cmd" in arguments and arguments["mux_cmd"] is not None:
+            cmd = arguments["mux_cmd"]
+            if not isinstance(cmd, list) or any(
+                not isinstance(directory, str) for directory in cmd
+            ):
+                raise ToolError("mux_cmd must be an array of strings")
 
-        return await super().call_tool(name, arguments, context)
+        return await super().call_tool(canonical_name, arguments, context)
 
 
 @dataclass
@@ -123,7 +150,7 @@ def create_mcp_server() -> MCPServer:
     server = StrictMCPServer("magy")
 
     @server.tool(
-        name="magy_run_start",
+        name="run_start",
         description=(
             "Start a detached, asynchronous execution run with Agy. "
             "WARNING: auto_approval defaults to True, enabling "
@@ -134,7 +161,7 @@ def create_mcp_server() -> MCPServer:
         ),
         structured_output=True,
     )
-    def handle_magy_run_start(
+    def handle_run_start(
         prompt: Annotated[str, Field(min_length=1)],
         workspace: str | None = None,
         profile: str | None = None,
@@ -167,18 +194,17 @@ def create_mcp_server() -> MCPServer:
             _raise_tool_error("Run could not be started", exc)
 
     @server.tool(
-        name="magy_run_headful",
+        name="pane_start",
         description=(
             "Open an interactive Agy session in a split pane in the active Zellij "
-            "session. The pane owns live output and interaction; this tool returns "
-            "pane metadata immediately and does not capture its result. Requires "
-            "OpenCode's Magy MCP server to run inside Zellij. auto_approval defaults "
-            "to True and adds --dangerously-skip-permissions; set it to False to "
-            "approve tool requests interactively in the pane."
+            "session or custom terminal multiplexer. The pane owns live output and interaction; "
+            "this tool returns pane metadata immediately and does not capture its result. "
+            "auto_approval defaults to True and adds --dangerously-skip-permissions; set it to "
+            "False to approve tool requests interactively in the pane."
         ),
         structured_output=True,
     )
-    def handle_magy_run_headful(
+    def handle_pane_start(
         prompt: Annotated[str, Field(min_length=1)],
         workspace: str | None = None,
         profile: str | None = None,
@@ -189,6 +215,8 @@ def create_mcp_server() -> MCPServer:
         sandbox: StrictBool | None = None,
         additional_dirs: list[str] | None = None,
         auto_approval: StrictBool = True,
+        mux: str = "auto",
+        mux_cmd: list[str] | None = None,
     ) -> HeadfulRun:
         try:
             return start_headful_run(
@@ -202,6 +230,8 @@ def create_mcp_server() -> MCPServer:
                 sandbox=sandbox,
                 additional_dirs=additional_dirs,
                 auto_approval=auto_approval,
+                mux=mux,
+                mux_cmd=mux_cmd,
             )
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
@@ -209,7 +239,7 @@ def create_mcp_server() -> MCPServer:
             _raise_tool_error("Headful run could not be started", exc)
 
     @server.tool(
-        name="magy_run_wait",
+        name="run_wait",
         description=(
             "Wait for an execution run to finish or reach terminal state, returning "
             "its current status. Clamped to safe MCP timeout limits (0.1s to 60s) "
@@ -217,7 +247,7 @@ def create_mcp_server() -> MCPServer:
         ),
         structured_output=True,
     )
-    async def handle_magy_run_wait(run_id: str, timeout: float = 20.0) -> RunStatus:
+    async def handle_run_wait(run_id: str, timeout: float = 20.0) -> RunStatus:
         try:
             clamped_timeout = max(0.1, min(float(timeout), 60.0))
             deadline = time.monotonic() + clamped_timeout
@@ -231,28 +261,28 @@ def create_mcp_server() -> MCPServer:
             _raise_tool_error("Run could not be waited", exc)
 
     @server.tool(
-        name="magy_run_status",
+        name="run_status",
         description=(
             "Get the current status of an execution run. Omits prompt, raw "
             "command arguments, and credential paths."
         ),
         structured_output=True,
     )
-    def handle_magy_run_status(run_id: str) -> RunStatus:
+    def handle_run_status(run_id: str) -> RunStatus:
         try:
             return get_run_status(run_id)
         except Exception as exc:
             _raise_tool_error("Run status is unavailable", exc)
 
     @server.tool(
-        name="magy_run_result",
+        name="run_result",
         description=(
             "Retrieve bounded UTF-8 output chunks with stable byte offsets from an "
             "execution run's stdout log. Maximum chunk size is 1 MiB."
         ),
         structured_output=True,
     )
-    def handle_magy_run_result(
+    def handle_run_result(
         run_id: str,
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[
@@ -266,21 +296,21 @@ def create_mcp_server() -> MCPServer:
             _raise_tool_error("Run result is unavailable", exc)
 
     @server.tool(
-        name="magy_run_cancel",
+        name="run_cancel",
         description=(
             "Cancel a running or queued execution run, terminating its entire "
             "process tree."
         ),
         structured_output=True,
     )
-    def handle_magy_run_cancel(run_id: str) -> RunStatus:
+    def handle_run_cancel(run_id: str) -> RunStatus:
         try:
             return cancel_run(run_id)
         except Exception as exc:
             _raise_tool_error("Run could not be cancelled", exc)
 
     @server.tool(
-        name="magy_profiles",
+        name="profiles",
         description=(
             "List all registered profiles, their health, cooldowns, and availability, "
             "along with round-robin routing status. Private home paths and internal "
@@ -288,7 +318,7 @@ def create_mcp_server() -> MCPServer:
         ),
         structured_output=True,
     )
-    def handle_magy_profiles() -> ProfilesResponse:
+    def handle_profiles() -> ProfilesResponse:
         try:
             profiles = load_profiles()
             routing = get_routing_status()
@@ -315,19 +345,18 @@ def create_mcp_server() -> MCPServer:
             _raise_tool_error("Profiles are unavailable", exc)
 
     @server.tool(
-        name="magy_run_review_start",
+        name="watch_start",
         description=(
-            "This tool executes Agy non-interactively in a user-facing Zellij pane. "
-            "The user can watch thinking and execution in real time. Supply "
-            "continue_review_id to resume a prior run's conversation on the same "
-            "profile. Cancel via magy_run_review_cancel if intervention is needed, "
-            "then call magy_run_review_start again with the prior review ID and a "
-            "refined prompt. The start call returns immediately; the final Git diff "
-            "is retrieved with magy_run_review_result after the run completes."
+            "This tool executes Agy non-interactively in a user-facing terminal pane (Zellij "
+            "or custom multiplexer). The user can watch thinking and execution in real time. "
+            "Supply continue_watch_id (or continue_review_id) to resume a prior run's conversation "
+            "on the same profile. Cancel via watch_cancel if intervention is needed, then call "
+            "watch_start again with the prior watch ID and a refined prompt. The start call "
+            "returns immediately; the final Git diff is retrieved with watch_diff after the run completes."
         ),
         structured_output=True,
     )
-    def handle_magy_run_review_start(
+    def handle_watch_start(
         prompt: Annotated[str, Field(min_length=1)],
         workspace: str | None = None,
         profile: str | None = None,
@@ -338,7 +367,10 @@ def create_mcp_server() -> MCPServer:
         sandbox: StrictBool | None = None,
         additional_dirs: list[str] | None = None,
         auto_approval: StrictBool = False,
+        continue_watch_id: str | None = None,
         continue_review_id: str | None = None,
+        mux: str = "auto",
+        mux_cmd: list[str] | None = None,
     ) -> ReviewRunStart:
         try:
             return start_review_run(
@@ -353,116 +385,143 @@ def create_mcp_server() -> MCPServer:
                 additional_dirs=additional_dirs,
                 auto_approval=auto_approval,
                 continue_review_id=continue_review_id,
+                continue_watch_id=continue_watch_id,
+                mux=mux,
+                mux_cmd=mux_cmd,
             )
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
-            _raise_tool_error("Review run could not be started", exc)
+            _raise_tool_error("Watch run could not be started", exc)
 
     @server.tool(
-        name="magy_run_review_status",
+        name="watch_status",
         description=(
-            "Get the current status of a reviewed execution run. "
+            "Get the current status of a watched execution run. "
             "Omits prompt, raw commands, and secret paths."
         ),
         structured_output=True,
     )
-    def handle_magy_run_review_status(review_id: str) -> ReviewRunStatus:
+    def handle_watch_status(
+        watch_id: str | None = None,
+        review_id: str | None = None,
+    ) -> ReviewRunStatus:
+        target_id = watch_id or review_id
+        if not target_id:
+            raise ToolError("watch_id is required")
         try:
-            return get_review_status(review_id)
+            return get_review_status(target_id)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
-            _raise_tool_error("Review run status is unavailable", exc)
+            _raise_tool_error("Watch run status is unavailable", exc)
 
     @server.tool(
-        name="magy_run_review_wait",
+        name="watch_wait",
         description=(
-            "Wait for a reviewed execution run to finish or reach terminal state, "
+            "Wait for a watched execution run to finish or reach terminal state, "
             "returning its current status. Clamped to safe MCP timeout limits "
             "(0.1s to 60s) to prevent gateway timeouts."
         ),
         structured_output=True,
     )
-    async def handle_magy_run_review_wait(
-        review_id: str,
+    async def handle_watch_wait(
+        watch_id: str | None = None,
+        review_id: str | None = None,
         timeout: float = 20.0,
     ) -> ReviewRunStatus:
+        target_id = watch_id or review_id
+        if not target_id:
+            raise ToolError("watch_id is required")
         try:
             clamped_timeout = max(0.1, min(float(timeout), 60.0))
             deadline = time.monotonic() + clamped_timeout
             while time.monotonic() < deadline:
-                status = await asyncio.to_thread(get_review_status, review_id)
+                status = await asyncio.to_thread(get_review_status, target_id)
                 if status.status in TERMINAL_REVIEW_STATUSES:
                     return status
                 await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-            return await asyncio.to_thread(get_review_status, review_id)
+            return await asyncio.to_thread(get_review_status, target_id)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
-            _raise_tool_error("Review run could not be waited", exc)
+            _raise_tool_error("Watch run could not be waited", exc)
 
     @server.tool(
-        name="magy_run_review_log",
+        name="watch_log",
         description=(
             "Retrieve bounded UTF-8 output chunks with stable byte offsets from a "
-            "reviewed execution run's PTY log for mid-run monitoring."
+            "watched execution run's PTY log for mid-run monitoring."
         ),
         structured_output=True,
     )
-    def handle_magy_run_review_log(
-        review_id: str,
+    def handle_watch_log(
+        watch_id: str | None = None,
+        review_id: str | None = None,
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[
             int,
             Field(ge=MIN_RESULT_CHUNK_BYTES, le=MAX_RESULT_CHUNK_BYTES),
         ] = 65536,
     ) -> ReviewLogResult:
+        target_id = watch_id or review_id
+        if not target_id:
+            raise ToolError("watch_id is required")
         try:
-            return get_review_log(review_id, offset=offset, limit=limit)
+            return get_review_log(target_id, offset=offset, limit=limit)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
-            _raise_tool_error("Review log is unavailable", exc)
+            _raise_tool_error("Watch log is unavailable", exc)
 
     @server.tool(
-        name="magy_run_review_cancel",
+        name="watch_cancel",
         description=(
-            "Cancel a reviewed execution run, terminating its process tree, "
-            "closing its Zellij pane, and releasing its repository lease."
+            "Cancel a watched execution run, terminating its process tree, "
+            "closing its terminal pane, and releasing its repository lease."
         ),
         structured_output=True,
     )
-    def handle_magy_run_review_cancel(review_id: str) -> ReviewRunStatus:
+    def handle_watch_cancel(
+        watch_id: str | None = None,
+        review_id: str | None = None,
+    ) -> ReviewRunStatus:
+        target_id = watch_id or review_id
+        if not target_id:
+            raise ToolError("watch_id is required")
         try:
-            return cancel_review_run(review_id)
+            return cancel_review_run(target_id)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
-            _raise_tool_error("Review run could not be cancelled", exc)
+            _raise_tool_error("Watch run could not be cancelled", exc)
 
     @server.tool(
-        name="magy_run_review_result",
+        name="watch_diff",
         description=(
             "Retrieve bounded chunks of the final Git diff with stable byte offsets "
-            "after a reviewed execution run completes."
+            "after a watched execution run completes."
         ),
         structured_output=True,
     )
-    def handle_magy_run_review_result(
-        review_id: str,
+    def handle_watch_diff(
+        watch_id: str | None = None,
+        review_id: str | None = None,
         offset: Annotated[int, Field(ge=0)] = 0,
         limit: Annotated[
             int,
             Field(ge=MIN_RESULT_CHUNK_BYTES, le=MAX_RESULT_CHUNK_BYTES),
         ] = 65536,
     ) -> ReviewDiffResult:
+        target_id = watch_id or review_id
+        if not target_id:
+            raise ToolError("watch_id is required")
         try:
-            return get_review_result(review_id, offset=offset, limit=limit)
+            return get_review_result(target_id, offset=offset, limit=limit)
         except (RuntimeError, ValueError) as exc:
             _raise_tool_error(str(exc), exc)
         except Exception as exc:
-            _raise_tool_error("Review result is unavailable", exc)
+            _raise_tool_error("Watch diff is unavailable", exc)
 
     return server
 

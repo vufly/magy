@@ -30,18 +30,31 @@ def start_headful_run(
     sandbox: bool | None = None,
     additional_dirs: list[str] | None = None,
     auto_approval: bool = True,
+    mux: str = "auto",
+    mux_cmd: list[str] | None = None,
 ) -> HeadfulRun:
     """Launch an interactive Magy run in a new pane in the current Zellij session."""
-    zellij = shutil.which("zellij")
-    if zellij is None:
-        raise RuntimeError(
-            "Headful mode requires Zellij installed and available on PATH"
-        )
+    if mux_cmd is not None:
+        if not isinstance(mux_cmd, list) or not mux_cmd or any(
+            not isinstance(d, str) or not d.strip() for d in mux_cmd
+        ):
+            raise ValueError("mux_cmd must be a non-empty list of strings")
+        zellij = None
+    elif mux in ("auto", "zellij"):
+        zellij = shutil.which("zellij")
+        if zellij is None:
+            raise RuntimeError(
+                "Headful mode requires Zellij installed and available on PATH"
+            )
 
-    if not os.environ.get("ZELLIJ") or not os.environ.get("ZELLIJ_SESSION_NAME"):
-        raise RuntimeError(
-            "Headful mode requires Magy MCP to run inside an active Zellij session; "
-            "start OpenCode from Zellij and reconnect its MCP server"
+        if not os.environ.get("ZELLIJ") or not os.environ.get("ZELLIJ_SESSION_NAME"):
+            raise RuntimeError(
+                "Headful mode requires Magy MCP to run inside an active Zellij session; "
+                "start OpenCode from Zellij and reconnect its MCP server"
+            )
+    else:
+        raise ValueError(
+            f"Multiplexer '{mux}' is not supported yet; specify mux='zellij' or provide 'mux_cmd'"
         )
 
     workspace_path = Path(workspace).expanduser() if workspace else Path.cwd()
@@ -87,6 +100,33 @@ def start_headful_run(
     for directory in additional_dirs or []:
         agy_args.extend(["--add-dir", directory])
 
+    target_cmd = [
+        sys.executable,
+        "-m",
+        "magy.cli",
+        "--profile",
+        selected.name,
+        "--",
+        *agy_args,
+    ]
+
+    if mux_cmd is not None:
+        if any("{cmd}" in arg for arg in mux_cmd):
+            command = [arg.replace("{cmd}", " ".join(target_cmd)) for arg in mux_cmd]
+        else:
+            command = [*mux_cmd, *target_cmd]
+        try:
+            proc = subprocess.Popen(command, cwd=str(workspace_path))
+            pane_id = f"terminal_{proc.pid}"
+        except Exception as exc:
+            raise RuntimeError(f"Multiplexer could not create headful pane: {exc}") from exc
+        return HeadfulRun(
+            profile=selected.name,
+            session=mux,
+            pane_id=pane_id,
+            workspace=str(workspace_path),
+        )
+
     command = [
         zellij,
         "action",
@@ -98,13 +138,7 @@ def start_headful_run(
         "--name",
         f"Magy {selected.name}",
         "--",
-        sys.executable,
-        "-m",
-        "magy.cli",
-        "--profile",
-        selected.name,
-        "--",
-        *agy_args,
+        *target_cmd,
     ]
 
     try:
@@ -129,7 +163,7 @@ def start_headful_run(
 
     return HeadfulRun(
         profile=selected.name,
-        session=os.environ["ZELLIJ_SESSION_NAME"],
+        session=os.environ.get("ZELLIJ_SESSION_NAME", "zellij"),
         pane_id=pane_id[-1].strip(),
         workspace=str(workspace_path),
     )
