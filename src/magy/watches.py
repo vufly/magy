@@ -46,7 +46,7 @@ class WatchRunRequest:
     mode: str | None = None
     sandbox: bool | None = None
     additional_dirs: list[str] | None = None
-    auto_approval: bool = False
+    auto_approval: bool = True
     continue_watch_id: str | None = None
     conversation_id: str | None = None
     baseline_tree: str = ""
@@ -609,7 +609,7 @@ def start_watch_run(
     mode: str | None = None,
     sandbox: bool | None = None,
     additional_dirs: list[str] | None = None,
-    auto_approval: bool = False,
+    auto_approval: bool = True,
     continue_watch_id: str | None = None,
     mux: str = "auto",
     mux_cmd: list[str] | None = None,

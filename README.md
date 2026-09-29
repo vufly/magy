@@ -209,9 +209,10 @@ floating pane while providing durable Git diff capture, profile-pinned
 conversation continuation (`continue_watch_id`), baseline dirty-file
 exclusion, and bounded real-time stream monitoring. The runner renders live
 human-readable progress in the pane and closes its execution pane upon
-completion. An orchestrating client can inspect results or diffs. Note that
-`auto_approval=true` is required for tool actions so Agy uses
-`--dangerously-skip-permissions`.
+completion. An orchestrating client can inspect results or diffs. Like `run_start`
+and `pane_start`, `watch_start` defaults to `auto_approval=true`
+(`--dangerously-skip-permissions`); set `auto_approval=false` if tool actions
+should not skip permissions.
 
 ---
 

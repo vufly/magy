@@ -1,4 +1,6 @@
 import asyncio
+import os
+import signal
 import sys
 import time
 from dataclasses import dataclass
@@ -332,11 +334,14 @@ def create_mcp_server() -> MCPServer:
         description=(
             "This tool executes Agy non-interactively in a user-facing terminal "
             "pane (Zellij or custom multiplexer). The user can watch thinking and "
-            "execution in real time. Supply continue_watch_id to resume a prior "
-            "run's conversation on the same profile. Cancel via watch_cancel if "
-            "intervention is needed, then call watch_start again with the prior "
-            "watch ID and a refined prompt. The start call returns immediately; "
-            "the final Git diff is retrieved with watch_diff after completion."
+            "execution in real time. auto_approval defaults to True and adds "
+            "--dangerously-skip-permissions; set it to False to approve tool requests "
+            "interactively or deny unconfirmed actions. Supply continue_watch_id to "
+            "resume a prior run's conversation on the same profile. Cancel via "
+            "watch_cancel if intervention is needed, then call watch_start again "
+            "with the prior watch ID and a refined prompt. The start call returns "
+            "immediately; the final Git diff is retrieved with watch_diff "
+            "after completion."
         ),
         structured_output=True,
     )
@@ -350,7 +355,7 @@ def create_mcp_server() -> MCPServer:
         mode: str | None = None,
         sandbox: StrictBool | None = None,
         additional_dirs: list[str] | None = None,
-        auto_approval: StrictBool = False,
+        auto_approval: StrictBool = True,
         continue_watch_id: str | None = None,
         mux: str = "auto",
         mux_cmd: list[str] | None = None,
@@ -498,16 +503,22 @@ def main(argv: list[str] | None = None) -> int:
         print("Run the Magy Model Context Protocol (MCP) server over stdio.")
         return 0
 
+    try:
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: os._exit(0))
+    except (ValueError, AttributeError):
+        pass
+
     server = create_mcp_server()
     try:
         server.run(transport="stdio")
-        return 0
+        os._exit(0)
     except (KeyboardInterrupt, SystemExit):
-        return 0
+        os._exit(0)
     except Exception as e:
         print(f"MCP server error: {e}", file=sys.stderr)
         return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    os._exit(code)

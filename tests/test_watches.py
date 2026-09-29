@@ -722,3 +722,67 @@ def test_runner_failure_status_returns_nonzero(
 
     exit_code = run_watch_runner(str(watch_dir))
     assert exit_code == 1
+
+
+def test_start_watch_run_auto_approval_default_and_override(
+    mock_environment, git_repo: Path, monkeypatch
+):
+    """watch_start defaults to auto_approval=True (--dangerously-skip-permissions).
+
+    Can be explicitly overridden to False.
+    """
+    import io
+
+    from magy.watch_runner import run_watch_runner
+
+    fake_ndjson = "\n".join(
+        [
+            '{"event":"result","result":{"status":"SUCCESS","duration_seconds":1.0,"num_turns":1,"usage":{"total_tokens":10}}}',
+            "",
+        ]
+    )
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = io.StringIO(fake_ndjson)
+            self.returncode = 0
+
+        def wait(self):
+            return 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    captured_cmds = []
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if any("magy.cli" in str(arg) for arg in cmd):
+            captured_cmds.append(list(cmd))
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("magy.watch_runner.subprocess.Popen", fake_popen)
+
+    # 1. Default should be auto_approval=True
+    start_default = start_watch_run("Default auto approval", workspace=str(git_repo))
+    req_default = watches.get_watch_request(start_default.watch_id)
+    assert req_default.auto_approval is True
+
+    run_watch_runner(str(get_watch_dir(start_default.watch_id)))
+    assert "--dangerously-skip-permissions" in captured_cmds[-1]
+    finalize_watch(start_default.watch_id, exit_code=0)
+
+    # 2. Explicit False should omit --dangerously-skip-permissions
+    start_explicit_false = start_watch_run(
+        "Explicit false", workspace=str(git_repo), auto_approval=False
+    )
+    req_explicit_false = watches.get_watch_request(start_explicit_false.watch_id)
+    assert req_explicit_false.auto_approval is False
+
+    run_watch_runner(str(get_watch_dir(start_explicit_false.watch_id)))
+    assert "--dangerously-skip-permissions" not in captured_cmds[-1]
+    finalize_watch(start_explicit_false.watch_id, exit_code=0)

@@ -64,7 +64,7 @@ def test_mcp_server_registers_all_tools():
         assert "watch_cancel" in watch_start.description
         assert "watch_diff" in watch_start.description
         assert (
-            watch_start.input_schema["properties"]["auto_approval"]["default"] is False
+            watch_start.input_schema["properties"]["auto_approval"]["default"] is True
         )
         assert watch_start.input_schema["additionalProperties"] is False
         assert watch_start.output_schema is not None
@@ -461,7 +461,13 @@ def test_mcp_watch_tools_dispatch(monkeypatch):
         eof=True,
     )
 
-    monkeypatch.setattr(magy.mcp_server, "start_watch_run", lambda **kw: fake_start)
+    captured_watch_start_kw = {}
+
+    def fake_start_watch(**kw):
+        captured_watch_start_kw.update(kw)
+        return fake_start
+
+    monkeypatch.setattr(magy.mcp_server, "start_watch_run", fake_start_watch)
     monkeypatch.setattr(magy.mcp_server, "get_watch_status", lambda wid: fake_status)
     monkeypatch.setattr(magy.mcp_server, "get_watch_log", lambda wid, **kw: fake_log)
     monkeypatch.setattr(
@@ -481,6 +487,7 @@ def test_mcp_watch_tools_dispatch(monkeypatch):
         assert res1.is_error is False
         assert res1.structured_content["watch_id"] == "watch_test123"
         assert res1.structured_content["pane_id"] == "terminal_99"
+        assert captured_watch_start_kw.get("auto_approval") is True
 
         # 2. status
         res2 = await server.call_tool("watch_status", {"watch_id": "watch_test123"})
@@ -562,3 +569,50 @@ def test_mcp_mux_validation():
             )
 
     asyncio.run(_test())
+
+
+def _start_initialized_mcp_server():
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "magy.mcp_server"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    init_msg = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "magy-test", "version": "1"},
+        },
+    }
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps(init_msg) + "\n")
+    proc.stdin.flush()
+    assert proc.stdout is not None
+    resp = proc.stdout.readline()
+    assert resp
+    return proc
+
+
+def test_mcp_server_stdin_eof_fast_exit():
+    proc = _start_initialized_mcp_server()
+    start = time.time()
+    assert proc.stdin is not None
+    proc.stdin.close()
+    ret = proc.wait(timeout=2.0)
+    elapsed = time.time() - start
+    assert ret == 0
+    assert elapsed < 0.2
+
+
+def test_mcp_server_sigterm_exit_zero():
+    import signal
+
+    proc = _start_initialized_mcp_server()
+    proc.send_signal(signal.SIGTERM)
+    ret = proc.wait(timeout=2.0)
+    assert ret == 0

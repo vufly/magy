@@ -91,7 +91,7 @@ Tools are registered with un-prefixed names. When loaded into clients that names
 | `run_result` | Retrieve bounded output chunks with stable offsets | `run_id`, `offset` (default 0), `limit` (default 64 KiB) |
 | `run_cancel` | Terminate a running or queued process tree | `run_id` |
 | `profiles` | Query registered profiles, availability, and routing | None |
-| `watch_start` | Start a watched non-interactive Agy run in a floating pane with Git snapshots | `prompt` (required), `workspace`, `profile`, `model`, `agent`, `effort`, `mode`, `sandbox`, `additional_dirs`, `auto_approval` (default False; True required for automated tool actions), `continue_watch_id`, `mux`, `mux_cmd` |
+| `watch_start` | Start a watched non-interactive Agy run in a floating pane with Git snapshots | `prompt` (required), `workspace`, `profile`, `model`, `agent`, `effort`, `mode`, `sandbox`, `additional_dirs`, `auto_approval` (default True, adds `--dangerously-skip-permissions`), `continue_watch_id`, `mux`, `mux_cmd` |
 | `watch_status` | Query watched run status (`running`, `completed`, `failed`, `cancelled`) | `watch_id` (required) |
 | `watch_wait` | Short-poll until a watched run completes, fails, or is cancelled | `watch_id` (required), `timeout` (default 20s, max 60s) |
 | `watch_log` | Retrieve bounded execution log chunks (NDJSON events) for mid-run monitoring | `watch_id` (required), `offset` (default 0), `limit` (default 64 KiB) |
@@ -126,7 +126,7 @@ The watched workflow (`watch_*`) allows an orchestrating agent to delegate tasks
 ### Execution Model
 
 1. **Non-Interactive Floating Pane**: Unlike `pane_start` (which opens an interactive REPL in a split pane), watched runs launch `agy --print <prompt> --output-format stream-json` in a floating terminal pane. The user observes thinking and execution in real time as human-readable events rendered in the pane, while stderr is inherited live. The process exits automatically upon completion, leaving process control to the orchestrating agent.
-2. **Tool Permissions and Auto-Approval**: In `stream-json` mode, Agy operates non-interactively and does not accept interactive approval prompts in the terminal pane. While `watch_start` defaults to `auto_approval=False`, setting `auto_approval=True` is required so that Agy passes `--dangerously-skip-permissions`; without it, tool actions requiring permissions are denied.
+2. **Tool Permissions and Auto-Approval**: In `stream-json` mode, Agy operates non-interactively and cannot prompt interactively for tool approvals. Like `run_start` and `pane_start`, `watch_start` defaults to `auto_approval=True` so that Agy passes `--dangerously-skip-permissions` to allow tool execution. Set `auto_approval=False` if unconfirmed tool actions should be denied.
 3. **Mid-Run Monitoring**: Terminal events are recorded as raw NDJSON in `watches/<watch-id>/pty.log` while rendered in human-readable form in the pane. The harness agent can read chunked logs mid-run with `watch_log` to observe progress without blocking.
 4. **Git Baseline Snapshots & Dirt Exclusion**: Prior to launching the pane, Magy creates a temporary Git index tree snapshot of tracked, staged, unstaged, and non-ignored untracked files without altering the user's working tree or index. When execution finishes, a final snapshot is taken and net diff computed:
    ```bash
