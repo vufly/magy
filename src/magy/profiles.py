@@ -148,8 +148,6 @@ ALLOWLISTED_SETTINGS_DIRS = (
     "commands",
     "config",
     "policies",
-    "skills",
-    "antigravity-cli/skills",
 )
 
 DENIED_FILE_PATTERNS = (
@@ -949,6 +947,8 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
                 valid_dirs = []
                 for dirname in dirs:
                     dir_path = Path(root) / dirname
+                    if dir_path == real_gemini_dir / "config" / "skills":
+                        continue
                     rel_dir = dir_path.relative_to(real_gemini_dir)
                     if dir_path.is_symlink() or _is_rel_path_denied(rel_dir):
                         continue
@@ -986,12 +986,52 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
             _assert_windows_path_safe(real_gemini_dir)
             _assert_windows_path_safe(target_gemini)
 
-            for s_dest in (
-                target_gemini / "skills",
-                target_gemini / "config" / "skills",
-            ):
-                if s_dest.is_symlink():
-                    s_dest.unlink()
+            skills_src: Path | None = None
+            if (real_gemini_dir / "skills").exists() or (
+                real_gemini_dir / "skills"
+            ).is_symlink():
+                skills_src = real_gemini_dir / "skills"
+            elif (real_gemini_dir / "config" / "skills").exists() or (
+                real_gemini_dir / "config" / "skills"
+            ).is_symlink():
+                skills_src = real_gemini_dir / "config" / "skills"
+
+            if skills_src is not None:
+                for dest in (
+                    target_gemini / "skills",
+                    target_gemini / "config" / "skills",
+                ):
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if dest.is_symlink():
+                        try:
+                            if os.readlink(str(dest)) != str(skills_src):
+                                dest.unlink()
+                                dest.symlink_to(skills_src, target_is_directory=True)
+                        except OSError:
+                            pass
+                    elif dest.is_dir():
+                        import shutil
+
+                        shutil.rmtree(dest)
+                        try:
+                            dest.symlink_to(skills_src, target_is_directory=True)
+                        except OSError:
+                            pass
+                    elif not dest.exists():
+                        try:
+                            dest.symlink_to(skills_src, target_is_directory=True)
+                        except OSError:
+                            pass
+            else:
+                for dest in (
+                    target_gemini / "skills",
+                    target_gemini / "config" / "skills",
+                ):
+                    if dest.is_symlink():
+                        try:
+                            dest.unlink()
+                        except OSError:
+                            pass
 
             for src_path, rel_path in _iter_safe_source_files():
                 _assert_windows_path_safe(src_path)
@@ -1050,49 +1090,125 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
         src_root_dfd = _open_absolute_dir_fd(real_gemini_dir)
         target_root_dfd = _open_absolute_dir_fd(target_gemini)
 
-        try:
-            skills_stat = os.stat(
-                "skills", dir_fd=target_root_dfd, follow_symlinks=False
-            )
-        except FileNotFoundError:
-            skills_stat = None
-        if skills_stat is not None and stat.S_ISLNK(skills_stat.st_mode):
-            try:
-                os.unlink("skills", dir_fd=target_root_dfd)
-            except OSError as e:
-                raise ValueError(
-                    "Unsafe destination skills symlink could not be removed"
-                ) from e
-        elif skills_stat is not None and not stat.S_ISDIR(skills_stat.st_mode):
-            raise ValueError("Destination skills must be a directory")
+        skills_src: Path | None = None
+        if (real_gemini_dir / "skills").exists() or (
+            real_gemini_dir / "skills"
+        ).is_symlink():
+            skills_src = real_gemini_dir / "skills"
+        elif (real_gemini_dir / "config" / "skills").exists() or (
+            real_gemini_dir / "config" / "skills"
+        ).is_symlink():
+            skills_src = real_gemini_dir / "config" / "skills"
 
-        config_dfd = None
-        try:
-            config_dfd = _open_descendant_dir_fd(
-                target_root_dfd, ("config",), create=True
-            )
+        if skills_src is not None:
+            # 1. target_gemini / "skills"
             try:
                 skills_stat = os.stat(
-                    "skills", dir_fd=config_dfd, follow_symlinks=False
+                    "skills", dir_fd=target_root_dfd, follow_symlinks=False
                 )
             except FileNotFoundError:
                 skills_stat = None
+
             if skills_stat is not None and stat.S_ISLNK(skills_stat.st_mode):
                 try:
+                    cur_target = os.readlink("skills", dir_fd=target_root_dfd)
+                    if cur_target != str(skills_src):
+                        os.unlink("skills", dir_fd=target_root_dfd)
+                        os.symlink(str(skills_src), "skills", dir_fd=target_root_dfd)
+                except OSError:
+                    pass
+            elif skills_stat is not None and stat.S_ISDIR(skills_stat.st_mode):
+                import shutil
+
+                shutil.rmtree(target_gemini / "skills")
+                try:
+                    os.symlink(str(skills_src), "skills", dir_fd=target_root_dfd)
+                except OSError:
+                    pass
+            elif skills_stat is None:
+                try:
+                    os.symlink(str(skills_src), "skills", dir_fd=target_root_dfd)
+                except OSError:
+                    pass
+
+            # 2. target_gemini / "config" / "skills"
+            config_dfd = None
+            try:
+                config_dfd = _open_descendant_dir_fd(
+                    target_root_dfd, ("config",), create=True
+                )
+                try:
+                    cfg_skills_stat = os.stat(
+                        "skills", dir_fd=config_dfd, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    cfg_skills_stat = None
+
+                if cfg_skills_stat is not None and stat.S_ISLNK(
+                    cfg_skills_stat.st_mode
+                ):
+                    try:
+                        cur_target = os.readlink("skills", dir_fd=config_dfd)
+                        if cur_target != str(skills_src):
+                            os.unlink("skills", dir_fd=config_dfd)
+                            os.symlink(str(skills_src), "skills", dir_fd=config_dfd)
+                    except OSError:
+                        pass
+                elif cfg_skills_stat is not None and stat.S_ISDIR(
+                    cfg_skills_stat.st_mode
+                ):
+                    import shutil
+
+                    shutil.rmtree(target_gemini / "config" / "skills")
+                    try:
+                        os.symlink(str(skills_src), "skills", dir_fd=config_dfd)
+                    except OSError:
+                        pass
+                elif cfg_skills_stat is None:
+                    try:
+                        os.symlink(str(skills_src), "skills", dir_fd=config_dfd)
+                    except OSError:
+                        pass
+            except OSError as e:
+                raise ValueError(
+                    "Destination config directory contains an unsafe path component"
+                ) from e
+            finally:
+                if config_dfd is not None:
+                    os.close(config_dfd)
+        else:
+            try:
+                skills_stat = os.stat(
+                    "skills", dir_fd=target_root_dfd, follow_symlinks=False
+                )
+                if stat.S_ISLNK(skills_stat.st_mode):
+                    os.unlink("skills", dir_fd=target_root_dfd)
+            except OSError:
+                pass
+
+            config_dfd = None
+            try:
+                config_dfd = _open_descendant_dir_fd(
+                    target_root_dfd, ("config",), create=True
+                )
+                try:
+                    cfg_skills_stat = os.stat(
+                        "skills", dir_fd=config_dfd, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    cfg_skills_stat = None
+
+                if cfg_skills_stat is not None and stat.S_ISLNK(
+                    cfg_skills_stat.st_mode
+                ):
                     os.unlink("skills", dir_fd=config_dfd)
-                except OSError as e:
-                    raise ValueError(
-                        "Unsafe destination config/skills symlink could not be removed"
-                    ) from e
-            elif skills_stat is not None and not stat.S_ISDIR(skills_stat.st_mode):
-                raise ValueError("Destination config/skills must be a directory")
-        except OSError as e:
-            raise ValueError(
-                "Destination config directory contains an unsafe path component"
-            ) from e
-        finally:
-            if config_dfd is not None:
-                os.close(config_dfd)
+            except OSError as e:
+                raise ValueError(
+                    "Destination config directory contains an unsafe path component"
+                ) from e
+            finally:
+                if config_dfd is not None:
+                    os.close(config_dfd)
 
         for _src_path, rel_path in _iter_safe_source_files():
             _safe_copy_file_fd(src_root_dfd, target_root_dfd, rel_path)

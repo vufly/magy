@@ -265,11 +265,10 @@ def test_sync_profile_settings_copies_gemini_md(tmp_path: Path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
-def test_sync_profile_settings_rejects_external_skills_symlink(tmp_path: Path):
+def test_sync_profile_settings_symlinks_skills_directory(tmp_path: Path):
     real_gemini = tmp_path / "real_gemini"
     real_gemini.mkdir()
 
-    # Create external skills directory and symlink inside skills
     external_skills = tmp_path / "external_skills"
     external_skills.mkdir()
     skill_a = external_skills / "skill_a"
@@ -284,13 +283,16 @@ def test_sync_profile_settings_rejects_external_skills_symlink(tmp_path: Path):
     target_gemini = get_profile_home_dir("skills-sync-p") / ".gemini"
     target_skills = target_gemini / "skills"
 
-    # Must NOT follow external symlink or create symlink in profile (H3)
-    assert not target_skills.exists()
-    assert not target_skills.is_symlink()
+    assert target_skills.is_symlink()
+    assert os.readlink(str(target_skills)) == str(real_gemini / "skills")
+    assert (target_skills / "skill_a" / "SKILL.md").exists()
+    assert (target_skills / "skill_a" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "name: skill_a"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
-def test_sync_profile_settings_rejects_external_legacy_config_skills_symlink(
+def test_sync_profile_settings_symlinks_legacy_config_skills_directory(
     tmp_path: Path,
 ):
     real_gemini = tmp_path / "real_gemini"
@@ -310,72 +312,32 @@ def test_sync_profile_settings_rejects_external_legacy_config_skills_symlink(
     sync_profile_settings("legacy-skills-sync-p", real_gemini_dir=real_gemini)
 
     target_gemini = get_profile_home_dir("legacy-skills-sync-p") / ".gemini"
-    target_skills = target_gemini / "config" / "skills"
+    target_skills = target_gemini / "skills"
+    target_cfg_skills = target_gemini / "config" / "skills"
 
-    assert not target_skills.exists()
-    assert not target_skills.is_symlink()
+    assert target_skills.is_symlink()
+    assert os.readlink(str(target_skills)) == str(cfg_dir / "skills")
+    assert target_cfg_skills.is_symlink()
+    assert os.readlink(str(target_cfg_skills)) == str(cfg_dir / "skills")
+    assert (target_skills / "skill_a" / "SKILL.md").exists()
 
 
-def test_sync_profile_settings_copies_contained_skills(tmp_path: Path):
+def test_sync_profile_settings_replaces_directory_with_symlink(tmp_path: Path):
     real_gemini = tmp_path / "real_gemini"
     real_gemini.mkdir()
     skills_dir = real_gemini / "skills" / "skill_a"
     skills_dir.mkdir(parents=True)
     (skills_dir / "SKILL.md").write_text("name: skill_a", encoding="utf-8")
 
-    add_profile("skills-copy-p", kind="managed")
-    sync_profile_settings("skills-copy-p", real_gemini_dir=real_gemini)
+    add_profile("skills-replace-p", kind="managed")
+    target_gemini = get_profile_home_dir("skills-replace-p") / ".gemini"
+    (target_gemini / "skills").mkdir(parents=True)
 
-    target_gemini = get_profile_home_dir("skills-copy-p") / ".gemini"
-    target_skill_file = target_gemini / "skills" / "skill_a" / "SKILL.md"
+    sync_profile_settings("skills-replace-p", real_gemini_dir=real_gemini)
 
-    assert target_skill_file.exists()
-    assert target_skill_file.read_text(encoding="utf-8") == "name: skill_a"
-    assert not target_skill_file.is_symlink()
-    assert not (target_gemini / "skills").is_symlink()
-
-
-def test_sync_profile_settings_copies_global_skills(tmp_path: Path):
-    real_gemini = tmp_path / "real_gemini"
-    real_gemini.mkdir()
-    skills_dir = real_gemini / "antigravity-cli" / "skills" / "global_skill"
-    skills_dir.mkdir(parents=True)
-    (skills_dir / "SKILL.md").write_text("name: global_skill", encoding="utf-8")
-
-    add_profile("global-skills-copy-p", kind="managed")
-    sync_profile_settings("global-skills-copy-p", real_gemini_dir=real_gemini)
-
-    target_gemini = get_profile_home_dir("global-skills-copy-p") / ".gemini"
-    target_skill_file = (
-        target_gemini / "antigravity-cli" / "skills" / "global_skill" / "SKILL.md"
-    )
-
-    assert target_skill_file.exists()
-    assert target_skill_file.read_text(encoding="utf-8") == "name: global_skill"
-    assert not target_skill_file.is_symlink()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="Symlink tests for POSIX")
-def test_sync_profile_settings_cleans_destination_skills_symlink(tmp_path: Path):
-    real_gemini = tmp_path / "real_gemini"
-    real_gemini.mkdir()
-    skills_dir = real_gemini / "skills" / "skill_a"
-    skills_dir.mkdir(parents=True)
-    (skills_dir / "SKILL.md").write_text("name: skill_a", encoding="utf-8")
-
-    add_profile("dest-skills-link-p", kind="managed")
-    target_gemini = get_profile_home_dir("dest-skills-link-p") / ".gemini"
-
-    outside = tmp_path / "outside_victim"
-    outside.mkdir()
-    (target_gemini / "skills").symlink_to(outside, target_is_directory=True)
-
-    sync_profile_settings("dest-skills-link-p", real_gemini_dir=real_gemini)
-
-    target_skill_file = target_gemini / "skills" / "skill_a" / "SKILL.md"
-    assert target_skill_file.exists()
-    assert not (target_gemini / "skills").is_symlink()
-    assert not (outside / "skill_a").exists()
+    target_skills = target_gemini / "skills"
+    assert target_skills.is_symlink()
+    assert (target_skills / "skill_a" / "SKILL.md").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="dir_fd and symlink tests for POSIX")
