@@ -148,6 +148,8 @@ ALLOWLISTED_SETTINGS_DIRS = (
     "commands",
     "config",
     "policies",
+    "skills",
+    "antigravity-cli/skills",
 )
 
 DENIED_FILE_PATTERNS = (
@@ -984,9 +986,12 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
             _assert_windows_path_safe(real_gemini_dir)
             _assert_windows_path_safe(target_gemini)
 
-            skills_dest = target_gemini / "config" / "skills"
-            if skills_dest.is_symlink():
-                skills_dest.unlink()
+            for s_dest in (
+                target_gemini / "skills",
+                target_gemini / "config" / "skills",
+            ):
+                if s_dest.is_symlink():
+                    s_dest.unlink()
 
             for src_path, rel_path in _iter_safe_source_files():
                 _assert_windows_path_safe(src_path)
@@ -1044,6 +1049,22 @@ def sync_profile_settings(name: str, real_gemini_dir: Path | None = None) -> lis
         validate_profile_layout(name)
         src_root_dfd = _open_absolute_dir_fd(real_gemini_dir)
         target_root_dfd = _open_absolute_dir_fd(target_gemini)
+
+        try:
+            skills_stat = os.stat(
+                "skills", dir_fd=target_root_dfd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            skills_stat = None
+        if skills_stat is not None and stat.S_ISLNK(skills_stat.st_mode):
+            try:
+                os.unlink("skills", dir_fd=target_root_dfd)
+            except OSError as e:
+                raise ValueError(
+                    "Unsafe destination skills symlink could not be removed"
+                ) from e
+        elif skills_stat is not None and not stat.S_ISDIR(skills_stat.st_mode):
+            raise ValueError("Destination skills must be a directory")
 
         config_dfd = None
         try:
