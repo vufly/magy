@@ -6,6 +6,94 @@ import time
 
 from magy.agy import collect_diagnostics
 
+# Known agy subcommands that magy recognises for profile-aware dispatch.
+# "help" is intentionally excluded — magy's help command takes precedence,
+# but delegates to agy help as well (see handle_help_command).
+_AGY_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "agent",
+        "agents",
+        "changelog",
+        "install",
+        "mcp",
+        "mic-serve",
+        "models",
+        "plugin",
+        "plugins",
+        "remote-control",
+        "update",
+    }
+)
+
+# Tokens that consume the next argv element as their value.
+_PROFILE_FLAGS = frozenset({"-p", "--profile"})
+
+
+def _extract_profile_flag(argv: list[str]) -> tuple[str | None, list[str]]:
+    """Scan *argv* for -p/--profile (in any position) and remove them.
+
+    Supports all forms:
+      -p <val>   --profile <val>   --profile=<val>   -p=<val>   -p<val>
+
+    Returns ``(profile_value, remaining_argv)``.  The remaining argv still
+    contains the agy subcommand and all of its own flags — only the magy
+    profile-selection flag is stripped.
+    """
+    profile: str | None = None
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _PROFILE_FLAGS:
+            if i + 1 < len(argv):
+                profile = argv[i + 1]
+                i += 2
+            else:
+                # Malformed — leave it; parser will error later.
+                rest.append(tok)
+                i += 1
+        elif tok.startswith("--profile="):
+            profile = tok.split("=", 1)[1]
+            i += 1
+        elif tok.startswith("-p="):
+            profile = tok.split("=", 1)[1]
+            i += 1
+        elif tok.startswith("-p") and len(tok) > 2 and not tok.startswith("-p-"):
+            # e.g. -pinviwater — only when the char after -p is not a hyphen
+            # to avoid misidentifying flags like -print (hypothetical).
+            profile = tok[2:]
+            i += 1
+        else:
+            rest.append(tok)
+            i += 1
+    return profile, rest
+
+
+def _first_non_flag(argv: list[str]) -> str | None:
+    """Return the first argv token that is not a flag or a flag's value.
+
+    Skips ``-p``/``--profile`` *and* their associated values so that
+    ``magy -p foo models`` correctly identifies ``models`` as the first
+    non-flag token.
+    """
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _PROFILE_FLAGS:
+            i += 2  # skip flag + value
+            continue
+        if tok.startswith("--profile=") or tok.startswith("-p="):
+            i += 1
+            continue
+        if tok.startswith("-p") and len(tok) > 2 and not tok.startswith("-p-"):
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok
+    return None
+
 
 def build_parser() -> argparse.ArgumentParser:
     fmt = argparse.RawDescriptionHelpFormatter
@@ -20,10 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Commands & Modes:\n"
-            "  magy [OPTIONS] [COMMAND...]     Run agy with automatic round-robin\n"
-            "  magy -p <name> [COMMAND...]     Run agy with an explicit profile\n"
-            "  magy [OPTIONS] -- [AGY_ARGS...] Forward arguments directly to agy\n"
-            "  magy <subcommand> [OPTIONS]     Execute a Magy management command\n\n"
+            "  magy [OPTIONS] [COMMAND...]      Run agy with automatic round-robin\n"
+            "  magy -p <name> [COMMAND...]      Run agy with an explicit profile\n"
+            "  magy [OPTIONS] -- [AGY_ARGS...]  Forward arguments directly to agy\n"
+            "  magy <subcommand> [OPTIONS]      Execute a Magy management command\n"
+            "  magy <agy-sub> [-p <name>] ...   Run an agy subcommand in a profile\n\n"
             "Examples:\n"
             "  # Run agy with automatic round-robin profile selection:\n"
             '  magy "Analyze performance in src/"\n'
@@ -31,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  # Run agy with an explicit profile:\n"
             '  magy -p work "Refactor user authentication"\n'
             "  magy --profile=personal -- git status\n\n"
+            "  # Run agy subcommands in a specific profile:\n"
+            "  magy models -p inviwater\n"
+            "  magy mcp list --profile work\n"
+            "  magy plugin install some-plugin -p personal\n"
+            "  magy changelog\n\n"
             "  # Check environment prerequisites and health:\n"
             "  magy doctor\n\n"
             "  # View profiles and routing health overview:\n"
@@ -698,7 +792,13 @@ def handle_profile_command(
 def handle_help_command(topics: list[str], parser: argparse.ArgumentParser) -> int:
     clean_topics = [t for t in topics if t != "help"]
     if not clean_topics or clean_topics[0] in ("-h", "--help", "-p", "--profile"):
+        # Show magy help first, then agy's help via a profile.
         parser.print_help()
+        print()
+        print("─" * 60)
+        print("agy subcommands (run via magy <agy-sub> [-p <profile>]):")
+        print("─" * 60)
+        _run_agy_subcommand(["help"])
         return 0
 
     cmd = clean_topics[0]
@@ -729,13 +829,64 @@ def handle_help_command(topics: list[str], parser: argparse.ArgumentParser) -> i
                 return 0
             raise
         return 0
+    elif cmd in _AGY_SUBCOMMANDS:
+        # Delegate to agy help <sub> via a profile (round-robin).
+        _run_agy_subcommand(["help", cmd] + list(sub_topics))
+        return 0
     else:
         print(
-            f"magy: error: unknown help topic '{' '.join(clean_topics)}'. "
-            f"Run 'magy help' or 'magy --help' for available commands.",
+            f"magy: error: unknown help topic '{' '.join(clean_topics)}'.\n"
+            f"  Run 'magy help' or 'magy --help' for available magy commands.\n"
+            f"  Use 'magy -- <agy-args>' to pass arbitrary args directly to agy.",
             file=sys.stderr,
         )
         return 2
+
+
+def _run_agy_subcommand(agy_args: list[str], profile: str | None = None) -> int:
+    """Run *agy_args* through a profile (round-robin if *profile* is None).
+
+    Used for delegating agy subcommands from ``magy help`` and the agy
+    subcommand dispatch path in ``main()``.  Errors are printed to stderr.
+    Returns the exit code.
+    """
+    from magy.profiles import run_in_profile
+    from magy.routing import NoAvailableProfileError, select_profile
+
+    try:
+        selected = select_profile(explicit_name=profile)
+    except (KeyError, ValueError, NoAvailableProfileError) as e:
+        print(f"magy: error: {e}", file=sys.stderr)
+        return 1
+
+    sys.stderr.write(f"[magy] using profile: {selected.name}\n")
+    sys.stderr.flush()
+
+    try:
+        return run_in_profile(
+            selected.name,
+            agy_args,
+            inject_log_file=False,
+            sync_settings=False,
+            update_health=False,
+            expected_incarnation_id=selected.incarnation_id,
+        )
+    except subprocess.TimeoutExpired as e:
+        print(
+            f"magy: error: command timed out after {e.timeout} seconds",
+            file=sys.stderr,
+        )
+        return 124
+    except (
+        KeyError,
+        RuntimeError,
+        ValueError,
+        FileNotFoundError,
+        PermissionError,
+        OSError,
+    ) as e:
+        print(f"magy: error: {e}", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -826,6 +977,17 @@ def main(argv: list[str] | None = None) -> int:
                     f"misplaced subcommand '{sub}': subcommands must precede "
                     f"options or use 'magy {sub}'"
                 )
+
+    # Agy subcommand mode — first non-flag token is a known agy subcommand.
+    # -p/--profile may appear anywhere in argv; strip it for profile selection
+    # and forward the rest to agy unchanged.
+    if post_args is None:
+        first_token = _first_non_flag(list(argv))
+        if first_token in _AGY_SUBCOMMANDS:
+            target_profile, agy_args = _extract_profile_flag(list(argv))
+            if target_profile == "":
+                parser.error("argument --profile: cannot be empty")
+            return _run_agy_subcommand(agy_args, profile=target_profile)
 
     # Agy passthrough mode
     target_profile: str | None = None
