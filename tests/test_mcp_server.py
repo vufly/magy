@@ -568,6 +568,13 @@ def test_mcp_mux_validation():
                 "pane_start", {"prompt": "test", "mux": "invalid_mux"}
             )
 
+        with pytest.raises(
+            ToolError, match="Multiplexer 'invalid_mux' is not supported"
+        ):
+            await server.call_tool(
+                "watch_start", {"prompt": "test", "mux": "invalid_mux"}
+            )
+
     asyncio.run(_test())
 
 

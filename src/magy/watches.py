@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,8 @@ class WatchRunState:
     diff_path: str = ""
     exit_signal_path: str = ""
     conversation_id: str | None = None
+    mux: str = "zellij"
+    mux_socket: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -362,7 +365,40 @@ def validate_zellij_environment() -> str:
     return zellij
 
 
-def is_pane_alive(pane_id: str) -> bool:
+def validate_tmux_environment() -> tuple[str, str]:
+    """Verify tmux executable and active session environment."""
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        raise RuntimeError("Watched mode requires tmux installed and available on PATH")
+    tmux_env = os.environ.get("TMUX")
+    tmux_pane = os.environ.get("TMUX_PANE")
+    if not tmux_env or not tmux_pane:
+        raise RuntimeError(
+            "Watched mode requires Magy MCP to run inside an active tmux session with "
+            "TMUX and TMUX_PANE set; start inside tmux and reconnect"
+        )
+    context = tmux_env.rsplit(",", 2)
+    if (
+        len(context) != 3
+        or not context[0]
+        or not all(part.isascii() and part.isdecimal() for part in context[1:])
+        or not is_valid_tmux_pane_id(tmux_pane)
+    ):
+        raise RuntimeError("Watched mode requires valid TMUX and TMUX_PANE context")
+    return tmux, context[0]
+
+
+def is_valid_tmux_pane_id(pane_id: str) -> bool:
+    """Validate whether pane_id matches native tmux %N format."""
+    return bool(
+        pane_id
+        and pane_id.startswith("%")
+        and pane_id[1:].isascii()
+        and pane_id[1:].isdecimal()
+    )
+
+
+def is_zellij_pane_alive(pane_id: str) -> bool:
     """Check if a Zellij pane is open and active."""
     if not pane_id:
         return False
@@ -391,6 +427,49 @@ def is_pane_alive(pane_id: str) -> bool:
         return True
 
 
+def is_tmux_pane_alive(pane_id: str, mux_socket: str | None = None) -> bool:
+    """Check if a tmux pane is open and active."""
+    if not mux_socket or not is_valid_tmux_pane_id(pane_id):
+        return False
+    tmux = shutil.which("tmux")
+    if not tmux:
+        return False
+    cmd = [tmux]
+    if mux_socket:
+        cmd.extend(["-S", mux_socket])
+    cmd.extend(["display-message", "-p", "-t", pane_id, "#{pane_dead}"])
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if res.returncode != 0:
+            return False
+        return res.stdout.strip() == "0"
+    except Exception:
+        return True
+
+
+def is_pane_alive(
+    pane_id: str,
+    mux: str = "zellij",
+    mux_socket: str | None = None,
+) -> bool:
+    """Check if a terminal pane is open and active."""
+    if not pane_id:
+        return False
+    if mux == "tmux":
+        return is_tmux_pane_alive(pane_id, mux_socket=mux_socket)
+    if mux == "custom":
+        # Custom launchers may exit immediately after creating a pane. Their PID
+        # is not a pane identifier; rely on the runner's exit signal instead.
+        return True
+    return is_zellij_pane_alive(pane_id)
+
+
 def close_zellij_pane(pane_id: str) -> None:
     """Close Zellij pane by ID."""
     if not pane_id:
@@ -409,6 +488,43 @@ def close_zellij_pane(pane_id: str) -> None:
         )
     except Exception:
         pass
+
+
+def close_tmux_pane(pane_id: str, mux_socket: str | None = None) -> None:
+    """Close tmux pane by ID."""
+    if not mux_socket or not is_valid_tmux_pane_id(pane_id):
+        return
+    tmux = shutil.which("tmux")
+    if not tmux:
+        return
+    cmd = [tmux]
+    if mux_socket:
+        cmd.extend(["-S", mux_socket])
+    cmd.extend(["kill-pane", "-t", pane_id])
+    try:
+        subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def close_pane(
+    pane_id: str,
+    mux: str = "zellij",
+    mux_socket: str | None = None,
+) -> None:
+    """Close terminal pane by ID according to multiplexer backend."""
+    if not pane_id:
+        return
+    if mux == "zellij":
+        close_zellij_pane(pane_id)
+    elif mux == "tmux":
+        close_tmux_pane(pane_id, mux_socket=mux_socket)
 
 
 def get_watch_request(watch_id: str) -> WatchRunRequest:
@@ -532,7 +648,7 @@ def finalize_watch(
     # Close pane after lock release
     if curr.pane_id:
         try:
-            close_zellij_pane(curr.pane_id)
+            close_pane(curr.pane_id, mux=curr.mux, mux_socket=curr.mux_socket)
         except Exception:
             pass
 
@@ -572,7 +688,7 @@ def run_watch_monitor(
             finalize_watch(watch_id, exit_code=code)
             return 0
 
-        if not is_pane_alive(curr.pane_id):
+        if not is_pane_alive(curr.pane_id, mux=curr.mux, mux_socket=curr.mux_socket):
             if exit_file.exists():
                 try:
                     code = int(exit_file.read_text(encoding="utf-8").strip())
@@ -629,14 +745,53 @@ def start_watch_run(
             or any(not isinstance(d, str) or not d.strip() for d in mux_cmd)
         ):
             raise ValueError("mux_cmd must be a non-empty list of strings")
+        resolved_mux = "custom"
         zellij_bin = None
-    elif mux in ("auto", "zellij"):
-        zellij_bin = validate_zellij_environment()
-    else:
+        tmux_bin = None
+        tmux_socket = None
+        session_name = ""
+    elif not isinstance(mux, str) or mux not in ("auto", "zellij", "tmux"):
         raise ValueError(
-            f"Multiplexer '{mux}' is not supported yet; "
-            "specify mux='zellij' or provide 'mux_cmd'"
+            f"Multiplexer '{mux}' is not supported; "
+            "specify mux='auto', 'zellij', 'tmux', or provide 'mux_cmd'"
         )
+    else:
+        tmux_socket = None
+        if mux == "auto":
+            # Precedence: Zellij session context first if both are present.
+            has_zellij = bool(
+                shutil.which("zellij")
+                and os.environ.get("ZELLIJ")
+                and os.environ.get("ZELLIJ_SESSION_NAME")
+            )
+            has_tmux = bool(
+                shutil.which("tmux")
+                and os.environ.get("TMUX")
+                and os.environ.get("TMUX_PANE")
+            )
+            if has_zellij:
+                resolved_mux = "zellij"
+            elif has_tmux:
+                resolved_mux = "tmux"
+            else:
+                raise RuntimeError(
+                    "Watched mode requires Magy MCP to run inside an active Zellij "
+                    "or tmux session; start inside Zellij or tmux and reconnect "
+                    "its MCP server"
+                )
+        elif mux == "zellij":
+            resolved_mux = "zellij"
+        elif mux == "tmux":
+            resolved_mux = "tmux"
+
+        if resolved_mux == "zellij":
+            zellij_bin = validate_zellij_environment()
+            tmux_bin = None
+            session_name = os.environ.get("ZELLIJ_SESSION_NAME", "")
+        elif resolved_mux == "tmux":
+            tmux_bin, tmux_socket = validate_tmux_environment()
+            zellij_bin = None
+            session_name = os.environ.get("TMUX_PANE", "")
 
     ws = Path(workspace).expanduser() if workspace else Path.cwd()
     try:
@@ -713,7 +868,7 @@ def start_watch_run(
         "profile": profile_name,
         "workspace": str(workspace_path),
         "repo_root": str(repo_root),
-        "session": os.environ.get("ZELLIJ_SESSION_NAME", ""),
+        "session": session_name,
         "baseline_tree": None,
         "baseline_commit": head_commit,
         "final_tree": None,
@@ -729,6 +884,8 @@ def start_watch_run(
         "diff_path": None,
         "exit_signal_path": None,
         "conversation_id": conversation_id_to_continue,
+        "mux": resolved_mux,
+        "mux_socket": tmux_socket,
     }
     atomic_write_json(watch_dir / "state.json", _stub_state)
 
@@ -774,7 +931,7 @@ def start_watch_run(
             profile=profile_name,
             workspace=str(workspace_path),
             repo_root=str(repo_root),
-            session=os.environ.get("ZELLIJ_SESSION_NAME", ""),
+            session=session_name,
             baseline_tree=baseline_tree,
             baseline_commit=head_commit,
             started_at=time.time(),
@@ -782,6 +939,8 @@ def start_watch_run(
             diff_path=str(diff_file),
             exit_signal_path=str(exit_file),
             conversation_id=conversation_id_to_continue,
+            mux=resolved_mux,
+            mux_socket=tmux_socket,
         )
 
         atomic_write_json(watch_dir / "request.json", req.to_dict())
@@ -805,7 +964,7 @@ def start_watch_run(
         runner_sh.chmod(0o700)
 
         # Launch pane
-        if mux_cmd is not None:
+        if resolved_mux == "custom":
             runner_cmd = ["bash", str(runner_sh)]
             if any("{cmd}" in arg for arg in mux_cmd):
                 command = [
@@ -818,11 +977,15 @@ def start_watch_run(
                 pane_id = f"terminal_{proc.pid}"
             except Exception as exc:
                 raise RuntimeError(f"Multiplexer could not create pane: {exc}") from exc
-        else:
+        elif resolved_mux == "zellij":
+            # Anchor the floating pane to the caller's tab using the inherited
+            # ZELLIJ_PANE_ID and avoid stealing focus from the active tab/pane.
             command = [
                 zellij_bin,
                 "run",
                 "--floating",
+                "--near-current-pane",
+                "--no-focus",
                 "--name",
                 f"magy-task-{watch_id}",
                 "--cwd",
@@ -859,6 +1022,53 @@ def start_watch_run(
                 raise RuntimeError("Zellij created no pane for the watched Magy run")
 
             pane_id = pane_lines[-1].strip()
+        elif resolved_mux == "tmux":
+            origin_pane = os.environ.get("TMUX_PANE", "")
+            runner_cmd = ["bash", str(runner_sh)]
+            quoted_cmd = shlex.join(runner_cmd)
+            command = [
+                tmux_bin,
+                "-S",
+                tmux_socket,
+                "split-window",
+                "-h",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                origin_pane,
+                "-c",
+                str(workspace_path),
+                quoted_cmd,
+            ]
+
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=15,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("Tmux could not create a watched Magy pane") from exc
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Tmux could not create a watched Magy pane; verify the "
+                    "active session and target pane"
+                )
+
+            pane_lines = [
+                line.strip()
+                for line in result.stdout.strip().splitlines()
+                if line.strip()
+            ]
+            if not pane_lines or not is_valid_tmux_pane_id(pane_lines[-1]):
+                raise RuntimeError("Tmux created no pane for the watched Magy run")
+
+            pane_id = pane_lines[-1]
         update_watch_state(watch_id, {"pane_id": pane_id})
 
         spawn_detached_monitor(watch_id)
@@ -903,7 +1113,9 @@ def get_watch_status(watch_id: str) -> WatchRunStatus:
                 code = None
             if code is not None:
                 state = finalize_watch(watch_id, exit_code=code)
-        elif not is_pane_alive(state.pane_id):
+        elif not is_pane_alive(
+            state.pane_id, mux=state.mux, mux_socket=state.mux_socket
+        ):
             state = finalize_watch(
                 watch_id,
                 exit_code=1,
@@ -966,7 +1178,7 @@ def cancel_watch_run(watch_id: str) -> WatchRunStatus:
 
     if state.pane_id:
         try:
-            close_zellij_pane(state.pane_id)
+            close_pane(state.pane_id, mux=state.mux, mux_socket=state.mux_socket)
         except Exception:
             pass
 

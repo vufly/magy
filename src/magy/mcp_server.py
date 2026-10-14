@@ -333,15 +333,17 @@ def create_mcp_server() -> MCPServer:
         name="watch_start",
         description=(
             "This tool executes Agy non-interactively in a user-facing terminal "
-            "pane (Zellij or custom multiplexer). The user can watch thinking and "
-            "execution in real time. auto_approval defaults to True and adds "
-            "--dangerously-skip-permissions; set it to False to approve tool requests "
-            "interactively or deny unconfirmed actions. Supply continue_watch_id to "
-            "resume a prior run's conversation on the same profile. Cancel via "
-            "watch_cancel if intervention is needed, then call watch_start again "
-            "with the prior watch ID and a refined prompt. The start call returns "
-            "immediately; the final Git diff is retrieved with watch_diff "
-            "after completion."
+            "pane (Zellij, tmux, or custom multiplexer). mux=auto detects the session "
+            "(Zellij first); mux=zellij or mux=tmux selects explicitly. Native panes "
+            "stay in the originating tab/window without stealing focus. The user "
+            "can watch execution in real time. auto_approval defaults to True and "
+            "adds --dangerously-skip-permissions; set it to False to approve tool "
+            "requests interactively or deny unconfirmed actions. Supply "
+            "continue_watch_id to resume a prior run's conversation on the same "
+            "profile. Cancel via watch_cancel if intervention is needed, then call "
+            "watch_start again with the prior watch ID and a refined prompt. The "
+            "start call returns immediately; the final Git diff is retrieved with "
+            "watch_diff after completion."
         ),
         structured_output=True,
     )

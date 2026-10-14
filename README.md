@@ -190,7 +190,7 @@ Tools are registered with un-prefixed names so clients that prefix by server nam
 | `run_result` | Retrieve full stdout, stderr, or structured output once completed. |
 | `run_cancel` | Terminate an in-flight run and clean up all child processes. |
 | `profiles` | List configured profiles and their current health status. |
-| `watch_start` | Start watched Agy execution in a floating pane with Git baseline snapshots and conversation continuation. Supports `mux` / `mux_cmd`. |
+| `watch_start` | Start watched Agy execution in a user-facing terminal pane (Zellij floating pane or tmux split) with Git baseline snapshots and conversation continuation. Supports `mux` / `mux_cmd`. |
 | `watch_status` | Query status (`running`, `completed`, `failed`, `cancelled`) of a watched run. |
 | `watch_wait` | Short-poll until a watched run reaches a terminal state. |
 | `watch_log` | Stream bounded execution log chunks (NDJSON events) mid-run. |
@@ -205,9 +205,17 @@ in the new pane. It defaults to `auto_approval=true`; set `auto_approval=false` 
 pane.
 
 The `watch_*` workflow runs Agy non-interactively in a user-facing
-floating pane while providing durable Git diff capture, profile-pinned
+terminal pane (Zellij floating pane or tmux split) while providing durable Git
+diff capture, profile-pinned
 conversation continuation (`continue_watch_id`), baseline dirty-file
-exclusion, and bounded real-time stream monitoring. The runner renders live
+exclusion, and bounded real-time stream monitoring. `watch_start` natively supports
+both Zellij and tmux via `mux="auto"` (auto-detecting the session context, with Zellij
+taking precedence when both are present) or explicit `mux="zellij"` / `mux="tmux"`,
+as well as custom multiplexers via `mux_cmd`. Both native backends require an
+existing session and preserve focus. Zellij panes stay in the caller's origin tab
+using inherited `ZELLIJ_PANE_ID` (`--near-current-pane --no-focus`, verified on
+Zellij 0.45.1). Tmux splits target the originating `TMUX_PANE` on its saved socket.
+The runner renders live
 human-readable progress in the pane and closes its execution pane upon
 completion. An orchestrating client can inspect results or diffs. Like `run_start`
 and `pane_start`, `watch_start` defaults to `auto_approval=true`
